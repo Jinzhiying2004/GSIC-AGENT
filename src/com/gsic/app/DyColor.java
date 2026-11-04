@@ -16,9 +16,15 @@ public class DyColor {
     }
 
     public static boolean isDark(Context ctx) {
-        int night = ctx.getResources().getConfiguration().uiMode
-                & Configuration.UI_MODE_NIGHT_MASK;
-        return night == Configuration.UI_MODE_NIGHT_YES;
+        // v4.07 夜间模式可手动改、默认夜间：设置项说了算，不跟系统。
+        // true=夜间（默认），false=日间；设置不存在时默认夜间。
+        try {
+            return SettingRegistry.getBool(ctx, "ui.night_mode", true);
+        } catch (Exception e) {
+            int night = ctx.getResources().getConfiguration().uiMode
+                    & Configuration.UI_MODE_NIGHT_MASK;
+            return night == Configuration.UI_MODE_NIGHT_YES;
+        }
     }
 
     private static int sys(Context ctx, String name, int fallback) {

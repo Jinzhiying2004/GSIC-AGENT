@@ -60,6 +60,9 @@ public class LearningLadder {
 
     public void markAsked() { asked = true; }
 
+    /** v4.16 少问：本任务是否已经问过用户（TaskRunner 的 ask_user 用它做每任务一次硬上限）。 */
+    public boolean hasAsked() { return asked; }
+
     /** 选项裁剪到上限，去空去重。 */
     public static String[] capOptions(String[] options) {
         if (options == null) return new String[0];

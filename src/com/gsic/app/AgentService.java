@@ -38,6 +38,10 @@ public class AgentService extends Service {
 
     // v3.05：静态控制 TG（供 MainActivity 调用）
     private static AgentService instance = null;
+    // v4.18 锁屏章鱼待机：服务内登记亮屏/灭屏/解锁广播——锁屏亮屏
+    // 时挂黑屏章鱼，灭屏或解锁即收起（USER_PRESENT 是系统在解锁
+    // 成功后发的广播，不用 GSIC 自己猜锁屏状态）。
+    private android.content.BroadcastReceiver lockStandbyReceiver;
 
     public static void startTgStatic(Context ctx) {
         if (instance != null) {
@@ -146,15 +150,49 @@ public class AgentService extends Service {
             installRootWatchdog();
             // v3.05：TG 机器人随服务自启（后台真运行）
             tryStartTgBot();
-            // v3.67：内置 Cloudflare 隧道按开关恢复（快速隧道，手动同步地址）
+            // v3.91：启动优先级——内置节点优先；只有内置没开时，CF 隧道才按开关恢复。
+            // （手动启动 CF 不受影响；运行中内置断了再起 CF 属于运行时 fallback，另算。）
             try {
-                CloudflareTunnel.startIfEnabled(this, port);
+                TsnetNode.startIfEnabled(this, port);
+            } catch (Exception ignored) {
+            }
+            try {
+                if (!TsnetNode.isEnabled(this)) {
+                    CloudflareTunnel.startIfEnabled(this, port);
+                }
             } catch (Exception ignored) {
             }
             // v3.48：待机光效「M 八爪鱼」
             try {
                 pet = new PetController(this);
                 pet.start();
+            } catch (Exception ignored) {
+            }
+            // v4.18 锁屏章鱼待机：服务起来即登记，之后每次锁屏亮屏
+            // 都能挂出（开机自启后、GSIC 不在前台时同样生效）。
+            try {
+                lockStandbyReceiver = new android.content.BroadcastReceiver() {
+                    @Override
+                    public void onReceive(android.content.Context c,
+                            android.content.Intent intent) {
+                        String a = intent == null ? "" : intent.getAction();
+                        if (android.content.Intent.ACTION_SCREEN_ON.equals(a)) {
+                            LockStandby.maybeShow(c);
+                        } else if (android.content.Intent.ACTION_SCREEN_OFF.equals(a)
+                                || android.content.Intent.ACTION_USER_PRESENT.equals(a)) {
+                            LockStandby.hide();
+                        }
+                    }
+                };
+                android.content.IntentFilter f =
+                        new android.content.IntentFilter();
+                f.addAction(android.content.Intent.ACTION_SCREEN_ON);
+                f.addAction(android.content.Intent.ACTION_SCREEN_OFF);
+                f.addAction(android.content.Intent.ACTION_USER_PRESENT);
+                registerReceiver(lockStandbyReceiver, f);
+                // 服务启动时若屏已亮且正锁着（例如自启后第一次亮屏），
+                // 不等下一次 SCREEN_ON，直接判断一次。
+                LockStandby.maybeShow(this);
             } catch (Exception ignored) {
             }
         } catch (Exception e) {
@@ -292,9 +330,27 @@ public class AgentService extends Service {
     @Override
     public void onDestroy() {
         running = false;
+        // v4.18 锁屏章鱼待机：服务销毁时注销广播并收起锁屏层，
+        // 免得服务没了黑屏还盖在锁屏上。
+        try {
+            if (lockStandbyReceiver != null) {
+                unregisterReceiver(lockStandbyReceiver);
+                lockStandbyReceiver = null;
+            }
+        } catch (Exception ignored) {
+        }
+        try {
+            LockStandby.hide();
+        } catch (Exception ignored) {
+        }
         // v3.67：服务销毁时停隧道进程，开关保留，下次服务启动按开关恢复
         try {
             CloudflareTunnel.stopProcessOnly();
+        } catch (Exception ignored) {
+        }
+        // v3.82：服务销毁时优雅停 tsnet 进程，开关保留
+        try {
+            TsnetNode.stopProcessOnly();
         } catch (Exception ignored) {
         }
         if (pet != null) pet.stop();

@@ -41,7 +41,7 @@ public class UpdateManager {
      * apkUrl 指向对应 Release 附件。用户在设置里填了源则以用户的为准。
      */
     public static final String DEFAULT_SOURCE =
-            "https://raw.githubusercontent.com/Jinzhiying2004/phone-agent-gsic/main/version.json";
+            "https://raw.githubusercontent.com/Jinzhiying2004/GSIC-AGENT/main/version.json";
 
     public static String getSource(Context ctx) {
         String s = ctx.getSharedPreferences("update", Context.MODE_PRIVATE)

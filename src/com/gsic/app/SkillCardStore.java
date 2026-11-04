@@ -61,6 +61,8 @@ public class SkillCardStore {
         public String repairNote = "";
         /** 关联 App 包名（界面地图联动锚点） */
         public String appPkg = "";
+        /** v3.83：启用开关（false = 提示词不再注入，本次会话外持久化） */
+        public boolean enabled = true;
 
         public boolean isDraft() {
             return STATUS_DRAFT.equals(status);
@@ -100,6 +102,68 @@ public class SkillCardStore {
     private final List<Card> cards = new ArrayList<>();
     private final java.util.Map<String, List<VersionSnap>> versions =
             new java.util.HashMap<>();
+
+    // ---- v3.83 第三批：会话覆盖 + 使用计数（内存态，任务开始时 beginSession 清空） ----
+    private static final java.util.Set<String> sessionDisabled = new java.util.HashSet<>();
+    private static final java.util.Set<String> sessionCounted = new java.util.HashSet<>();
+    private static long lastUsageSaveMs = 0;
+    private static volatile boolean autoDeprioritize = true;
+    private static final long COLD_AFTER_MS = 30L * 24 * 3600 * 1000;
+
+    /** 新任务开始时调用：清空会话覆盖与本会话计数（不影响持久化 enabled）。 */
+    public static synchronized void beginSession() {
+        sessionDisabled.clear();
+        sessionCounted.clear();
+    }
+
+    public static synchronized void setSessionDisabled(String id, boolean disabled) {
+        if (disabled) sessionDisabled.add(id); else sessionDisabled.remove(id);
+    }
+
+    public static synchronized boolean isSessionDisabled(String id) {
+        return sessionDisabled.contains(id);
+    }
+
+    public static void setAutoDeprioritize(boolean v) { autoDeprioritize = v; }
+
+    /** 长期未用冷卡：从未用过且 30 天未更新（updatedAt=0 的极老卡不算冷，避免误伤）。 */
+    public static boolean isCold(Card c) {
+        return autoDeprioritize && c != null && c.useCount == 0
+                && c.updatedAt > 0
+                && System.currentTimeMillis() - c.updatedAt > COLD_AFTER_MS;
+    }
+
+    /** 可见过滤（启用且未被会话禁用）+ 冷卡排末尾（不删除）。 */
+    private static java.util.List<Card> visibleCards(java.util.List<Card> in, int cap) {
+        java.util.List<Card> hot = new java.util.ArrayList<>();
+        java.util.List<Card> cold = new java.util.ArrayList<>();
+        for (Card c : in) {
+            if (!c.enabled) continue;
+            if (sessionDisabled.contains(c.id)) continue;
+            if (isCold(c)) cold.add(c); else hot.add(c);
+        }
+        java.util.List<Card> out = new java.util.ArrayList<>(hot);
+        out.addAll(cold);
+        if (cap > 0 && out.size() > cap) out = out.subList(0, cap);
+        return out;
+    }
+
+    /** 注入记账：每张卡每会话只计一次使用，落盘节流 60 秒（避免每轮写文件）。 */
+    private synchronized void noteInjected(java.util.List<Card> injected) {
+        boolean dirty = false;
+        for (Card c : injected) {
+            if (sessionCounted.contains(c.id)) continue;
+            sessionCounted.add(c.id);
+            c.useCount++;
+            dirty = true;
+        }
+        if (!dirty) return;
+        long now = System.currentTimeMillis();
+        if (now - lastUsageSaveMs > 60000) {
+            lastUsageSaveMs = now;
+            save();
+        }
+    }
 
     /**
      * 版本快照（v3.58 生命周期步骤1）：修卡/回滚前压入历史。
@@ -340,6 +404,15 @@ public class SkillCardStore {
         }
     }
 
+    /** v3.83：持久化启用开关（false 的卡不再注入提示词，卡本身不删除）。 */
+    public synchronized boolean setEnabled(String id, boolean enabled) {
+        Card c = get(id);
+        if (c == null) return false;
+        c.enabled = enabled;
+        save();
+        return true;
+    }
+
     /** 可持续迭代更新 */
     public synchronized boolean update(String id, String name, String trigger,
                                        String content, String summary) {
@@ -467,9 +540,11 @@ public class SkillCardStore {
         return false;
     }
 
-    /** 给 prompt 用的精简描述（按优先级） */
+    /** 给 prompt 用的精简描述（按优先级；只拼本会话启用的卡，冷卡排末尾） */
     public synchronized String describeForPrompt() {
-        return describeCards(listByPriority());
+        java.util.List<Card> vis = visibleCards(listByPriority(), 0);
+        noteInjected(vis);
+        return describeCards(vis);
     }
 
     /**
@@ -480,8 +555,9 @@ public class SkillCardStore {
         if (goal == null || goal.trim().isEmpty()) return describeForPrompt();
         List<Card> matched = matchCards(new ArrayList<>(cards), goal);
         if (matched.isEmpty()) return describeForPrompt();
-        if (matched.size() > 5) matched = matched.subList(0, 5);
-        return describeCards(matched);
+        java.util.List<Card> vis = visibleCards(matched, 5);
+        noteInjected(vis);
+        return describeCards(vis);
     }
 
     private static String describeCards(List<Card> list) {
@@ -494,6 +570,7 @@ public class SkillCardStore {
             if (SRC_USER.equals(c.source)) sb.append("·优先");
             if (c.useCount > 0) sb.append("·已用").append(c.useCount).append("次");
             if (STATUS_DRAFT.equals(c.status)) sb.append("·草稿（待复验，调卡成功后转正）");
+            if (isCold(c)) sb.append("·长期未用（降权）");
             sb.append("）触发：").append(c.trigger)
                     .append(" —— ").append(c.summary).append("\n");
         }
@@ -582,6 +659,7 @@ public class SkillCardStore {
                 o.put("verifyCount", c.verifyCount);
                 o.put("repairNote", c.repairNote);
                 o.put("appPkg", c.appPkg);
+                o.put("enabled", c.enabled);
                 arr.put(o);
             }
             JSONObject root = new JSONObject();
@@ -667,6 +745,7 @@ public class SkillCardStore {
                 c.verifyCount = o.optInt("verifyCount", 0);
                 c.repairNote = o.optString("repairNote", "");
                 c.appPkg = o.optString("appPkg", "");
+                c.enabled = o.optBoolean("enabled", true);
                 if (c.isProse() != guide) misplaced = true;
                 if (get(c.id) != null) continue; // 同 id 已加载（去重）
                 cards.add(c);

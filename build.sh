@@ -35,6 +35,32 @@ if [ ! -f assets/vdinput.dex ] || [ tools/VdInput.java -nt assets/vdinput.dex ] 
   echo "vdinput.dex 已生成"
 fi
 
+# gsic-tsnet：内置 Tailscale 节点小进程（linux-arm64，tsnet 库原创程序，源码 tools/gsic-tsnet）。
+# 二进制不进 git 推送管线；缺失或源码更新时，若本机有 Go 则自动交叉编译重编，
+# 无 Go 时沿用已有二进制；两者都没有则直接报错，不静默出一个没有节点的包。
+if [ ! -f assets/gsic-tsnet ] || [ ! -s assets/gsic-tsnet ] || [ tools/gsic-tsnet/main.go -nt assets/gsic-tsnet ]; then
+  # 注意：tsnet 依赖的 go-json-experiment 原型版要求 Go 1.25 + jsonv2 实验 API，
+  # Go 1.27 已删该实验 API 下的旧符号，用 1.27 编译必败；故此处固定 Go 1.25.5。
+  if [ -x "$HOME/workspace/.go125/bin/go" ]; then
+    echo "== gsic-tsnet 交叉编译（linux/arm64，Go 1.25.5 + jsonv2） =="
+    export PATH="$HOME/workspace/.go125/bin:$PATH"
+    export GOEXPERIMENT=jsonv2
+    export GOPATH="$HOME/workspace/.gopath" GOMODCACHE="$HOME/workspace/.go-modcache"
+    # Go 编译中间文件绝不能走 /tmp（512MB tmpfs，tsnet 包一编译就满盘）：
+    export GOCACHE="$HOME/workspace/.go-build-cache" TMPDIR="$HOME/workspace/.tmp"
+    mkdir -p "$GOCACHE" "$TMPDIR"
+    export GOFLAGS=-mod=mod CGO_ENABLED=0 GOOS=linux GOARCH=arm64
+    (cd tools/gsic-tsnet && go build -trimpath -ldflags "-s -w" -o ../../assets/gsic-tsnet .)
+    chmod +x assets/gsic-tsnet
+  elif [ ! -s assets/gsic-tsnet ]; then
+    echo "错误：assets/gsic-tsnet 缺失且本机无 Go 1.25.5（应位于 ~/workspace/.go125/bin/go），无法内置 Tailscale 节点" >&2
+    exit 1
+  else
+    echo "警告：无 Go，沿用已有 assets/gsic-tsnet（源码有更新但未重编）"
+  fi
+fi
+ls -lh assets/gsic-tsnet
+
 # cloudflared：内置隧道二进制（linux-arm64 静态版，官方 GitHub releases）。
 # 二进制不进 git 推送管线；构建时缺失则自动拉取，存在则直接用。
 if [ ! -f assets/cloudflared ] || [ ! -s assets/cloudflared ]; then
@@ -100,7 +126,7 @@ import json, re
 m = open('AndroidManifest.xml').read()
 vc = re.search(r'versionCode=\"(\d+)\"', m).group(1)
 vn = re.search(r'versionName=\"([\d.]+)\"', m).group(1)
-apk_url = ('https://github.com/Jinzhiying2004/phone-agent-gsic'
+apk_url = ('https://github.com/Jinzhiying2004/GSIC-AGENT'
            '/releases/download/v%s/gsic-%s.apk' % (vn, vn))
 json.dump({'version': vn, 'versionCode': int(vc), 'apkUrl': apk_url,
            'notes': ''}, open('../version.json', 'w'), ensure_ascii=False, indent=2)

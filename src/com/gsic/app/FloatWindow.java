@@ -23,12 +23,66 @@ public class FloatWindow {
     /** 主界面是否在前台：在前台时不弹悬浮窗（界面里已有进度） */
     private static volatile boolean inApp = false;
 
+    // v4.00 顶部胶囊任务进度（用户 20:51 亲定）：任务运行时顶部蓝条
+    // 显示智能体思考/进度，纯文字、不显示代码；思考文本来源是
+    // AgentLoop 的 💭 行与任务目标，由 setProgressText 统一清洗后
+    // 存到这里，MainActivity 的 500ms 对表从这里读。
+    private static volatile String lastProgressText = "";
+
+    public static String getLastProgressText() {
+        return lastProgressText == null ? "" : lastProgressText;
+    }
+
+    public static void setProgressText(String text) {
+        String s = sanitizeProgress(text);
+        if (s != null) lastProgressText = s;
+    }
+
+    public static void clearProgressText() {
+        lastProgressText = "";
+    }
+
+    /** 只留纯文字：去代码围栏、行内代码、JSON/命令式行，单行化，超长截断 */
+    public static String sanitizeProgress(String text) {
+        if (text == null) return null;
+        String s = text.trim();
+        if (s.isEmpty()) return null;
+        // 代码围栏必须先处理：围栏在开头时整行就是代码，直接丢弃；
+        // 若先去掉开头的反引号，围栏会被破坏、语言名会漏网成正文
+        int fence = s.indexOf("```");
+        if (fence >= 0) s = s.substring(0, fence).trim();
+        if (s.isEmpty()) return null;
+        // JSON 也必须在去前缀前判：去前缀会把开头的 { [ 吃掉，
+        // 剩下的 "tool":"tap"} 就漏网成正文了（4.01 单测实证）
+        String t0 = s.trim();
+        if (t0.startsWith("{") || t0.startsWith("[")) return null;
+        // 去掉开头的 emoji/符号前缀（如 💭 / 🎯 / ⚙️），只留文字本身：
+        // ⚙️ 是 BMP 符号（U+2699），不在代理对范围内，旧正则漏了它，
+        // 改按“非字母非数字”一律去掉，中文/数字开头不受影响
+        s = s.replaceFirst("^[^\\p{L}\\p{N}]+", "").trim();
+        if (s.isEmpty()) return null;
+        s = s.replace("`", "");
+        // 命令式行直接丢弃，不显示代码
+        String t = s.trim();
+        if (t.startsWith("adb ") || t.startsWith("input ")
+                || t.startsWith("am ") || t.startsWith("pm ")
+                || t.startsWith("curl ") || t.startsWith("su ")
+                || t.startsWith("sh ")) return null;
+        s = s.replaceAll("\\s+", " ").trim();
+        if (s.isEmpty()) return null;
+        if (s.length() > 200) s = s.substring(0, 200);
+        return s;
+    }
+
     public static void setInApp(boolean v) {
         inApp = v;
-        // v3.48-p4（用户亲定）：流光边框与任务绑定，不再被「在 App 内」吞掉——
-        // 只要有任务在跑就必须显示，进 App 也不收；离开 App 时若任务中途发起
-        // 且边框缺失则补上
-        if (!v && isActive() && taskCtx != null && floatView == null) {
+        // v4.00（用户 20:51 亲定，覆盖 v3.48-p4 的“进 App 也不收”）：
+        // 软件内运行任务不需要显示色彩条——进度看顶部蓝条文字；
+        // 只有在桌面或其他窗口（离开 App）时才显示流光边框。
+        // 所以进 App 立即收起悬浮流光，离开 App 且任务在跑才补弹。
+        if (v) {
+            hide();
+        } else if (isActive() && taskCtx != null && floatView == null) {
             show(taskCtx, taskTitle);
         }
     }
@@ -74,6 +128,8 @@ public class FloatWindow {
     private static void postShow() {
         new android.os.Handler(android.os.Looper.getMainLooper())
                 .post(() -> {
+                    // v4.00：软件内不显示流光（进度看顶部蓝条），只在离开 App 时补弹
+                    if (inApp) { hide(); return; }
                     if (isActive() && floatView == null && taskCtx != null) {
                         show(taskCtx, taskTitle);
                     }
@@ -90,7 +146,10 @@ public class FloatWindow {
                 wdHandler = null;
                 return;
             }
-            if (floatView == null && taskCtx != null) {
+            // v4.00：软件内不显示流光， watchdog 在 App 内时收起已有的窗
+            if (inApp) {
+                if (floatView != null) hide();
+            } else if (floatView == null && taskCtx != null) {
                 show(taskCtx, taskTitle);
             }
             if (wdHandler != null) wdHandler.postDelayed(this, 2000);
@@ -112,6 +171,14 @@ public class FloatWindow {
                 gen++;
                 taskActive = true;
             }
+            // v4.18 锁屏章鱼待机：任务一开始就收起锁屏层——黑屏盖着
+            // 主屏时，模型拍到的也是黑屏，主屏任务根本没法做。
+            try {
+                LockStandby.hide();
+            } catch (Exception ignored) {
+            }
+            // v4.00：任务开始先把目标显示到顶部蓝条（思考还没出来时先看目标）
+            if (title != null && !title.isEmpty()) setProgressText(title);
             postShow();
             startWatchdog();
         } catch (Exception ignored) {
@@ -134,6 +201,7 @@ public class FloatWindow {
                         synchronized (FloatWindow.class) {
                             if (isActive() || gen != g) return;
                         }
+                        clearProgressText();
                         hide();
                     }, 1500);
         } catch (Exception ignored) {
@@ -148,6 +216,7 @@ public class FloatWindow {
             pulseUntilMs = 0;
             gen++;
         }
+        clearProgressText();
         hide();
     }
 
@@ -232,6 +301,9 @@ public class FloatWindow {
 
     /** v3.40 起无文字显示：pushLine 仅保留自愈（流光缺失时补上） */
     public static void pushLine(String text) {
+        // v4.00：pushLine 收到的已是 brief 截断行，不覆盖顶部全量思考；
+        // 顶部思考由 AgentLoop.log 的 💭 全量行经 setProgressText 写入，
+        // 这里只负责流光自愈（软件内时 postShow 会自行收起）。
         if (floatView == null && isActive() && taskCtx != null) {
             postShow();
         }

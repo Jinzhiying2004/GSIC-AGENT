@@ -185,7 +185,7 @@ public class VirtualDisplayManager {
 
     // ---- 悬浮预览（从显示）：App 通道虚拟屏任务时，在实体屏右上角小窗实时显示虚拟屏画面 ----
     // 2026-10-23 用户亲定：面积调小（宽 1/3 屏改为 1/4 屏，面积约 -44%）、
-    // 刷新提速（700ms 改为约 120ms，约 8fps；帧本身由监听驱动，不依赖模型调截图）。
+    // 刷新提速（700ms 改为约 120ms，约 8fps；v4.05 再提到约 42ms，24fps；帧本身由监听驱动，不依赖模型调截图）。
     private static volatile boolean previewEnabled = false;
     private static Context appCtx;
     private static android.widget.ImageView previewView;
@@ -268,7 +268,8 @@ public class VirtualDisplayManager {
                                     });
                         }
                         try {
-                            Thread.sleep(120);
+                            // v4.05 虚拟屏帧率 24fps：预览刷新约 42ms 一帧
+                            Thread.sleep(42);
                         } catch (Exception ignored) {}
                     }
                 }, "vd-preview").start();

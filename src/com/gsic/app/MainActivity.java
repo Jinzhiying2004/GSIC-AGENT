@@ -34,8 +34,11 @@ public class MainActivity extends Activity {
     private static final int ACCENT = 0xFF1E88E5;
     private static final int ACCENT_DARK = 0xFF1565C0;
     private static final int TAB_BG = 0xFFF0F0F0;
-    private static final int TEXT_DARK = 0xFF333333;
-    private static final int TEXT_GRAY = 0xFF777777;
+    // v4.07 夜间模式：这两处硬编码文字色不能再写死——
+    // 夜间卡片是深底，深灰文字会看不见。改成非常量，在 onCreate
+    // 按夜间/日间赋值（视图都在 onCreate 之后建，读到的是新值）。
+    private static int TEXT_DARK = 0xFF333333;
+    private static int TEXT_GRAY = 0xFF777777;
     private static final int GREEN = 0xFF2E7D32;
     private static final int RED = 0xFFC62828;
 
@@ -114,19 +117,173 @@ public class MainActivity extends Activity {
     private FlowLightDrawable inAppFlowDrawable;
     private final android.os.Handler inAppFlowHandler =
             new android.os.Handler(android.os.Looper.getMainLooper());
+    // v4.00 顶部胶囊任务进度：任务运行时蓝条右侧显示智能体思考
+    // （纯文字滚动），任务结束恢复只显示 GSIC
+    private android.widget.TextView appbarProgress;
+
+    // v4.01 横屏待机（用户 21:06 亲定）：横屏 60 秒无人为操作自动
+    // 进待机——全黑背景、只显示 M 八爪鱼（复用 PetView 随机行为：
+    // 停靠、贴边爬、追光点、探头、角落蜷睡冒 Zzz，爱干啥干啥），
+    // 任意触摸/按键即退出待机（首触只唤醒，不透传到底层按钮）。
+    // 只在横屏生效；任务在跑时不进待机（与桌面章鱼“任务启动即
+    // 淡出”同规则），任务中途启动则立即退出待机。
+    private android.widget.FrameLayout rootLayout;
+    private android.widget.FrameLayout standbyView;
+    private PetView standbyPet;
+    private boolean standbyOn = false;
+    // v4.03：待机前 tab 是否可见（退出待机时按原样恢复，
+    // 键盘已隐藏 tab 时不误恢复出来）
+    private boolean standbyTabWasVisible = false;
+    private final android.os.Handler standbyHandler =
+            new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable standbyEnter = new Runnable() {
+        @Override
+        public void run() {
+            try { enterStandby(); } catch (Exception ignored) {}
+        }
+    };
+
+    private void resetStandbyTimer() {
+        try {
+            standbyHandler.removeCallbacks(standbyEnter);
+            if (standbyOn || !landscapeLayout) return;
+            // v4.07 章鱼待机时间可手动改：设置页 ui.standby_seconds，
+            // v4.13 用户亲定：默认 1800 秒（30 分钟），设置里可手动改
+            // 任意秒数（不设上限；只防 0 与负数，低于 1 秒按 1 秒算）。
+            int secs = 1800;
+            try {
+                secs = SettingRegistry.getInt(this, "ui.standby_seconds", 1800);
+            } catch (Exception ignored) {}
+            if (secs < 1) secs = 1;
+            standbyHandler.postDelayed(standbyEnter, (long) secs * 1000);
+        } catch (Exception ignored) {}
+    }
+
+    private void enterStandby() {
+        if (standbyOn || !landscapeLayout || rootLayout == null) return;
+        if (!activityResumed) return;
+        // v4.02：只认真任务登记（isTaskActive），不认心跳租约
+        // （isActive 含 /screenshot、/action 的 20 秒脉冲）——
+        // 远程截屏只是看屏、不是在干活，不能阻止待机；
+        // 否则截屏那一下脉冲就会让对表把待机唤醒、截到的永远
+        // 是正常界面（4.01 实测：静置 70 秒截屏仍是主页，就是
+        // 截屏脉冲在截屏完成前把待机退出了）
+        // 2026-11-03 用户亲定：虚拟屏运行任务时不进章鱼待机——
+        // 手动 /action 虚拟屏操作不登记为任务，待机计时照样会到，
+        // 但虚拟屏开着就说明有任务在虚拟屏里跑、主页左窗还在
+        // 预览它，章鱼黑屏盖住主页就等于把任务画面藏起来了，
+        // 所以虚拟屏存活本身就和真任务一样阻止待机进入。
+        if (FloatWindow.isTaskActive()) return;
+        if (VirtualDisplayManager.isActive()) return;
+        try {
+            android.widget.FrameLayout black =
+                    new android.widget.FrameLayout(this);
+            black.setBackgroundColor(android.graphics.Color.BLACK);
+            // v4.03：待机层必须抬高层级——tab 胶囊和顶部蓝条都带
+            // elevation 8dp，Android 按层级画、不按加入顺序画，
+            // 待机黑屏默认 0 层级会被它们压在下面，看起来就是
+            // “待机时右边的 tab 没隐藏”（顶部蓝条同理）。
+            // 24dp 压过 8dp，黑屏真正盖住全屏，只留章鱼。
+            black.setElevation(dp(24));
+            // 双保险：进待机直接把 tab 藏起来，退出时按原样恢复
+            if (tabBarView != null) {
+                standbyTabWasVisible =
+                        tabBarView.getVisibility() == View.VISIBLE;
+                if (standbyTabWasVisible) {
+                    tabBarView.animate().cancel();
+                    tabBarView.setVisibility(View.GONE);
+                }
+            }
+            black.setClickable(true);
+            black.setOnTouchListener((v, e) -> {
+                if (e.getAction() == android.view.MotionEvent.ACTION_DOWN) {
+                    exitStandby();
+                }
+                return true;
+            });
+            PetView pet = new PetView(this);
+            black.addView(pet, new android.widget.FrameLayout.LayoutParams(
+                    android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                    android.widget.FrameLayout.LayoutParams.MATCH_PARENT));
+            rootLayout.addView(black, new android.widget.FrameLayout.LayoutParams(
+                    android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                    android.widget.FrameLayout.LayoutParams.MATCH_PARENT));
+            standbyView = black;
+            standbyPet = pet;
+            standbyOn = true;
+            pet.startAnim();
+        } catch (Exception ignored) {}
+    }
+
+    private void exitStandby() {
+        if (!standbyOn) return;
+        try {
+            if (standbyPet != null) standbyPet.stopAnim();
+            if (standbyView != null && rootLayout != null) {
+                rootLayout.removeView(standbyView);
+            }
+        } catch (Exception ignored) {
+        }
+        standbyView = null;
+        standbyPet = null;
+        standbyOn = false;
+        // v4.03：按进待机前的原样恢复 tab
+        try {
+            if (standbyTabWasVisible && tabBarView != null) {
+                tabBarView.setTranslationX(0);
+                tabBarView.setTranslationY(0);
+                tabBarView.setAlpha(1f);
+                tabBarView.setVisibility(View.VISIBLE);
+            }
+        } catch (Exception ignored) {
+        }
+        standbyTabWasVisible = false;
+        resetStandbyTimer();
+    }
+
+    @Override
+    public void onUserInteraction() {
+        super.onUserInteraction();
+        // 待机中任意操作先退出待机（不立即重进，计时从唤醒起重算）
+        if (standbyOn) {
+            exitStandby();
+            return;
+        }
+        resetStandbyTimer();
+    }
+
     private final Runnable inAppFlowTick = new Runnable() {
         @Override
         public void run() {
             try {
-                // v3.53：改认 isActive（任务登记 OR 远控操控心跳），与悬浮流光同判据
+                // v4.00（用户 20:51 亲定）：软件内运行任务不需要显示色彩条，
+                // 只有在桌面或其他窗口才显示流光——所以 App 内彩条恒关，
+                // 进度改由顶部蓝条文字显示；本对表只负责刷顶部文字。
+                if (inAppFlowStripe != null
+                        && inAppFlowStripe.getVisibility() == android.view.View.VISIBLE) {
+                    inAppFlowStripe.setVisibility(android.view.View.GONE);
+                    if (inAppFlowDrawable != null) inAppFlowDrawable.stop();
+                }
                 boolean on = FloatWindow.isActive();
-                if (inAppFlowStripe != null) {
-                    if (on && inAppFlowStripe.getVisibility() != android.view.View.VISIBLE) {
-                        inAppFlowStripe.setVisibility(android.view.View.VISIBLE);
-                        if (inAppFlowDrawable != null) inAppFlowDrawable.start();
-                    } else if (!on && inAppFlowStripe.getVisibility() == android.view.View.VISIBLE) {
-                        inAppFlowStripe.setVisibility(android.view.View.GONE);
-                        if (inAppFlowDrawable != null) inAppFlowDrawable.stop();
+                // v4.02：待机中真任务启动才退出（isTaskActive），
+                // 截屏/单步脉冲不再唤醒待机（见 enterStandby 注解）
+                // 2026-11-03 用户亲定：虚拟屏建起来也算任务在跑，
+                // 待机中虚拟屏出现同样退出待机（见 enterStandby 注解）。
+                if (standbyOn && (FloatWindow.isTaskActive()
+                        || VirtualDisplayManager.isActive())) exitStandby();
+                String prog = FloatWindow.getLastProgressText();
+                if (appbarProgress != null) {
+                    if (on && prog != null && !prog.isEmpty()) {
+                        if (appbarProgress.getVisibility() != android.view.View.VISIBLE) {
+                            appbarProgress.setVisibility(android.view.View.VISIBLE);
+                        }
+                        if (!prog.equals(String.valueOf(appbarProgress.getText()))) {
+                            appbarProgress.setText(prog);
+                            appbarProgress.setSelected(true);
+                        }
+                    } else if (appbarProgress.getVisibility() == android.view.View.VISIBLE) {
+                        appbarProgress.setVisibility(android.view.View.GONE);
+                        appbarProgress.setText("");
                     }
                 }
             } catch (Exception ignored) {
@@ -138,9 +295,12 @@ public class MainActivity extends Activity {
     private LinearLayout userProfileBox;
     private UserProfile userProfile;
     private CaptureStore captureStore;
-    private android.widget.ScrollView agentScrollView;
+    private FollowScrollView agentScrollView;
     private volatile boolean agentStop = true;
     private Thread agentThread;
+    // v3.83：纯聊天流式输出的线程与真取消句柄
+    private volatile Thread chatThread;
+    private LlmClient.StreamHandle chatStreamHandle;
     // 云端操控
     private TextView museTsStatus, museHelp;
     private Button museTsAppBtn;
@@ -461,7 +621,7 @@ public class MainActivity extends Activity {
 
             row.addView(bubble);
             agentMsgBox.addView(row);
-            if (agentScrollView != null) {
+            if (agentScrollView != null && SettingRegistry.getBool(this, "agent.chat_follow", true) && agentScrollView.isAtBottom()) {
                 agentScrollView.post(() -> agentScrollView.fullScroll(
                         android.view.View.FOCUS_DOWN));
             }
@@ -1025,7 +1185,9 @@ public class MainActivity extends Activity {
             refocusInput();
             final String chatGoal = goal;
             agentLog("💬 " + chatGoal);
-            new Thread(() -> {
+            final LlmClient.StreamHandle chatHandle = new LlmClient.StreamHandle();
+            chatStreamHandle = chatHandle;
+            chatThread = new Thread(() -> {
                 LlmClient llm = new LlmClient(llmStore.getBaseUrl(),
                         llmStore.getApiKeyRaw(), llmStore.getModel());
                 String prompt = "你是GSIC，一个友好、简洁的手机助手。用户说：" + chatGoal
@@ -1041,14 +1203,23 @@ public class MainActivity extends Activity {
                         final String t = token;
                         runOnUiThread(() -> {
                             tv.append(t);
-                            if (agentScrollView != null) {
+                            if (agentScrollView != null && SettingRegistry.getBool(this, "agent.chat_follow", true) && agentScrollView.isAtBottom()) {
                                 agentScrollView.post(() -> agentScrollView.fullScroll(
                                         android.view.View.FOCUS_DOWN));
                             }
                         });
                     }
-                });
+                }, chatHandle);
+                chatThread = null;
+                chatStreamHandle = null;
                 if (!r.ok) {
+                    if (r.text != null && r.text.contains("已取消")) {
+                        // 真取消：保留已输出的片段，只补停止标记，不覆写、不存历史
+                        runOnUiThread(() -> {
+                            if (tv != null) tv.append("（已停止）");
+                        });
+                        return;
+                    }
                     final String err = "出错了：" + r.text;
                     runOnUiThread(() -> {
                         if (tv != null) tv.setText("🤖 " + err);
@@ -1066,7 +1237,8 @@ public class MainActivity extends Activity {
                         }
                     });
                 }
-            }).start();
+            });
+            chatThread.start();
             return;
         }
         // 不再自动新开对话：保留上下文，历史消息即上下文
@@ -1395,6 +1567,23 @@ public class MainActivity extends Activity {
                             richDetail + " · 未完成");
                 }
                 runOnUiThread(this::refreshHistory);
+                // v4.14 补（用户 11-03 亲定）：App 通道跳出任务结束
+                // 回 GSIC 主页——AgentLoop finally 里 App 通道故意
+                // 没清跳出标记，留到这里消费：横屏切主页即横屏
+                // 模式（左虚拟屏 + 右工具 + 底部输入框），竖屏切
+                // 主页即主页菜单；没跳出的任务不受影响。
+                try {
+                    boolean jumped = getSharedPreferences("agent", MODE_PRIVATE)
+                            .getBoolean("task_jumped_out", false);
+                    if (jumped) {
+                        getSharedPreferences("agent", MODE_PRIVATE)
+                                .edit().putBoolean("task_jumped_out", false).apply();
+                        runOnUiThread(() -> {
+                            try { showPage(0); } catch (Exception ignored) {}
+                        });
+                        agentLog("跳出任务结束，已回 GSIC 主页");
+                    }
+                } catch (Exception ignored) {}
                 // 审计明细入库
                 if (auditAll.length() > 0) {
                     historyStore.setSteps(histId, auditAll.toString());
@@ -1466,6 +1655,315 @@ public class MainActivity extends Activity {
     private LinearLayout homeDetailWrap;
     private java.util.Map<String, LinearLayout> homeSections;
 
+    // v4.04 横屏主页：左虚拟屏、右工具与代码，横屏不显示设置内容。
+    // 竖屏主页保持原菜单/详情不变；横屏主页只显示这两个窗格。
+    private LinearLayout homeLandWrap;
+    private LinearLayout homeLandOuter;
+    private EditText homeLandInput;
+    private Button homeLandSendBtn;
+    private android.widget.ImageView homeVdView;
+    private TextView homeVdStatus;
+    private LinearLayout homeVdStandby;
+    private android.widget.ImageView homeVdIcon;
+    private TextView homeVdAppName;
+    private android.widget.ScrollView homeToolScroll;
+    private TextView homeToolView;
+    private TextView homeToolTitle;
+    private android.graphics.Bitmap homeVdLastBmp;
+    private long homeVdLastVer = -1;
+    private long homeToolLastVer = -1;
+    // v4.06 修正：初始值不能是 -1，否则 history.json 不存在时
+    // （mod 也是 -1）首刷会被误判“没变”而右边一直空白。
+    private long homeHistLastMod = -2;
+    private String homeLastRunKey = "";
+    private boolean homeRightIsStandby = false;
+    private final android.os.Handler homeLandHandler =
+            new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable homeLandTick = new Runnable() {
+        @Override
+        public void run() {
+            try {
+                if (homeLandOuter != null
+                        && homeLandOuter.getVisibility() == View.VISIBLE) {
+                    refreshHomeLand();
+                    // v4.05 虚拟屏帧率 24fps：虚拟屏运行时约 42ms 对一帧，
+                    // 待机时没有帧可对，1 秒刷一次待机内容即可。
+                    homeLandHandler.postDelayed(this,
+                            VirtualDisplayManager.isActive() ? 42 : 1000);
+                }
+            } catch (Exception ignored) {
+            }
+        }
+    };
+
+    private void startHomeLandTick() {
+        try {
+            homeLandHandler.removeCallbacks(homeLandTick);
+            homeLandHandler.post(homeLandTick);
+        } catch (Exception ignored) {}
+    }
+
+    private void stopHomeLandTick() {
+        try { homeLandHandler.removeCallbacks(homeLandTick); } catch (Exception ignored) {}
+    }
+
+    private void refreshHomeLand() {
+        try {
+            // v4.05 虚拟屏待机（和章鱼待机是两回事，别混）：
+            // 章鱼待机是整机 60 秒无人操作后的全黑章鱼屏；
+            // 虚拟屏待机是横屏主页里的常态——虚拟屏没任务时，
+            // 左边显示最近运行过的软件图标，右边显示最近任务日志。
+            // 虚拟屏运行时则左边实时画面（24fps 对帧）、右边当前任务工具代码。
+            if (VirtualDisplayManager.isActive()) {
+                if (homeToolTitle != null) homeToolTitle.setText("智能体工具与代码");
+                if (homeVdStandby != null) homeVdStandby.setVisibility(View.GONE);
+                if (homeVdView != null) homeVdView.setVisibility(View.VISIBLE);
+                long ver = VirtualDisplayManager.lastFrameVersion();
+                if (ver != homeVdLastVer) {
+                    homeVdLastVer = ver;
+                    android.graphics.Bitmap bmp =
+                            VirtualDisplayManager.screenshot();
+                    if (bmp != null) {
+                        if (homeVdView != null) homeVdView.setImageBitmap(bmp);
+                        if (homeVdLastBmp != null && homeVdLastBmp != bmp) {
+                            try { homeVdLastBmp.recycle(); } catch (Exception ignored) {}
+                        }
+                        homeVdLastBmp = bmp;
+                        if (homeVdStatus != null) {
+                            long age = VirtualDisplayManager.lastFrameAgeMs();
+                            homeVdStatus.setText("虚拟屏运行中 · 24fps · 帧 "
+                                    + (age == Long.MAX_VALUE ? "—"
+                                            : (age / 1000) + " 秒前"));
+                        }
+                    }
+                }
+                // 右：工具与代码——版本变了才刷文本并滚到底；
+                // 刚从待机切回运行时强制刷一次（右边还留着待机日志）。
+                if (homeRightIsStandby) {
+                    homeRightIsStandby = false;
+                    homeToolLastVer = -1;
+                }
+                long tv = AgentToolLog.getVersion();
+                if (tv != homeToolLastVer) {
+                    homeToolLastVer = tv;
+                    if (homeToolView != null) {
+                        if (AgentToolLog.isEmpty()) {
+                            homeToolView.setText("智能体尚未调用工具\n任务开始后，这里实时显示每次调用的工具名、参数代码与结果。");
+                        } else {
+                            homeToolView.setText(AgentToolLog.getText());
+                        }
+                    }
+                    if (homeToolScroll != null) {
+                        homeToolScroll.post(() -> homeToolScroll.fullScroll(
+                                android.view.View.FOCUS_DOWN));
+                    }
+                }
+            } else {
+                homeVdLastVer = -1;
+                homeRightIsStandby = true;
+                if (homeToolTitle != null) homeToolTitle.setText("最近运行过的任务");
+                if (homeVdView != null) homeVdView.setVisibility(View.GONE);
+                if (homeVdStandby != null) homeVdStandby.setVisibility(View.VISIBLE);
+                refreshVdStandbyLeft();
+                refreshVdStandbyRight();
+            }
+        } catch (Exception ignored) {}
+    }
+
+    // v4.14 横屏主页输入框发送：把文字喂给智能体页同一入口
+    // startAgent（斜杠指令、本地路由、执行中补充说明都复用），
+    // 发完把焦点还给主页输入框——startAgent 内部会 refocus 到
+    // 智能体页输入框（横屏主页里不可见），300ms 后主页输入框
+    // 再抢回焦点，用户可以连续下命令，不用重新点输入框。
+    private void sendHomeLandGoal() {
+        if (homeLandInput == null || agentGoal == null) return;
+        String goal = homeLandInput.getText().toString().trim();
+        if (goal.isEmpty()) return;
+        homeLandInput.setText("");
+        agentGoal.setText(goal);
+        startAgent();
+        if (homeLandInput != null) {
+            homeLandInput.postDelayed(() -> {
+                try { homeLandInput.requestFocus(); } catch (Exception ignored) {}
+            }, 300);
+        }
+    }
+
+    // v4.14 左窗触点换算：homeVdView 是 FIT_CENTER，虚拟屏帧
+    // 720x1280 按比例贴合、居中留黑边，触点先扣黑边再按比例
+    // 换算；点在黑边上返回 null（不转发，防点错屏外）。
+    private float[] mapVdPoint(View v, float tx, float ty) {
+        try {
+            android.graphics.drawable.Drawable d =
+                    ((android.widget.ImageView) v).getDrawable();
+            if (d == null) return null;
+            int dw = d.getIntrinsicWidth();
+            int dh = d.getIntrinsicHeight();
+            if (dw <= 0 || dh <= 0) return null;
+            int vw = v.getWidth();
+            int vh = v.getHeight();
+            float scale = Math.min((float) vw / dw, (float) vh / dh);
+            float dispW = dw * scale;
+            float dispH = dh * scale;
+            float offX = (vw - dispW) / 2f;
+            float offY = (vh - dispH) / 2f;
+            float rx = tx - offX;
+            float ry = ty - offY;
+            if (rx < 0 || ry < 0 || rx > dispW || ry > dispH) return null;
+            return new float[]{
+                    Math.max(0, Math.min(719, rx / scale)),
+                    Math.max(0, Math.min(1279, ry / scale))};
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    // v4.14 左窗转发：后台线程走常驻 root shell + VdInput，
+    // 与智能体任务共用一个 root shell（串行排队，任务跑着时
+    // 手动点按可能要等一等）；dex 不存在时先从 assets 释放。
+    private void forwardVdTap(float x, float y) {
+        new Thread(() -> {
+            try {
+                if (!VirtualDisplayManager.isActive()) return;
+                if (!ensureVdDexLocal()) return;
+                int did = VirtualDisplayManager.getDisplayId();
+                String dex = new java.io.File(getFilesDir(),
+                        "vdinput.dex").getAbsolutePath();
+                RootShell.get().exec("CLASSPATH=" + dex
+                        + " app_process /system/bin VdInput tap "
+                        + did + " " + x + " " + y, 15);
+            } catch (Exception ignored) {}
+        }).start();
+    }
+
+    private void forwardVdSwipe(float x1, float y1, float x2, float y2, int dur) {
+        new Thread(() -> {
+            try {
+                if (!VirtualDisplayManager.isActive()) return;
+                if (!ensureVdDexLocal()) return;
+                int did = VirtualDisplayManager.getDisplayId();
+                String dex = new java.io.File(getFilesDir(),
+                        "vdinput.dex").getAbsolutePath();
+                RootShell.get().exec("CLASSPATH=" + dex
+                        + " app_process /system/bin VdInput swipe "
+                        + did + " " + x1 + " " + y1 + " "
+                        + x2 + " " + y2 + " " + dur, 15);
+            } catch (Exception ignored) {}
+        }).start();
+    }
+
+    private boolean ensureVdDexLocal() {
+        try {
+            java.io.File dex = new java.io.File(getFilesDir(), "vdinput.dex");
+            if (dex.exists()) return true;
+            java.io.InputStream in = getAssets().open("vdinput.dex");
+            java.io.FileOutputStream out = new java.io.FileOutputStream(dex);
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            in.close();
+            out.close();
+            return true;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    // 左待机：最近运行过的软件图标与名字（智能体成功启动过的那个）。
+    private void refreshVdStandbyLeft() {
+        try {
+            android.content.SharedPreferences sp =
+                    getSharedPreferences("agent", MODE_PRIVATE);
+            String pkg = sp.getString("last_run_pkg", "");
+            long at = sp.getLong("last_run_at", 0);
+            String key = pkg + "|" + at;
+            if (key.equals(homeLastRunKey)) return;
+            homeLastRunKey = key;
+            if (pkg.isEmpty()) {
+                if (homeVdIcon != null) homeVdIcon.setImageDrawable(null);
+                if (homeVdAppName != null) {
+                    homeVdAppName.setText("暂无最近运行的软件\n智能体成功启动过的软件会显示在这里");
+                }
+                if (homeVdStatus != null) {
+                    homeVdStatus.setText("虚拟屏待机 · 无任务运行");
+                }
+                return;
+            }
+            try {
+                android.content.pm.PackageManager pm = getPackageManager();
+                android.content.pm.ApplicationInfo ai =
+                        pm.getApplicationInfo(pkg, 0);
+                if (homeVdIcon != null) {
+                    homeVdIcon.setImageDrawable(pm.getApplicationIcon(ai));
+                }
+                String label = pm.getApplicationLabel(ai).toString();
+                if (homeVdAppName != null) homeVdAppName.setText(label);
+            } catch (Exception e) {
+                if (homeVdIcon != null) homeVdIcon.setImageDrawable(null);
+                if (homeVdAppName != null) homeVdAppName.setText(pkg);
+            }
+            if (homeVdStatus != null) {
+                String when = at > 0 ? new java.text.SimpleDateFormat(
+                        "MM-dd HH:mm", java.util.Locale.getDefault())
+                        .format(new java.util.Date(at)) : "";
+                homeVdStatus.setText("虚拟屏待机 · 无任务运行"
+                        + (when.isEmpty() ? "" : " · 最近运行 " + when));
+            }
+        } catch (Exception ignored) {}
+    }
+
+    // 右待机：最近运行过的任务日志（HistoryStore 已按最新在前排好），
+    // 取前 5 条；末尾一行是规则待机思考，不是模型调用——
+    // 模型待机思考会一直烧 Key，本版不做，需要再单独做带开关与间隔的待机思考循环。
+    private void refreshVdStandbyRight() {
+        try {
+            java.io.File hf = new java.io.File(getFilesDir(), "history.json");
+            long mod = hf.exists() ? hf.lastModified() : -1;
+            if (mod == homeHistLastMod) return;
+            homeHistLastMod = mod;
+            java.util.List<HistoryStore.Entry> list =
+                    new HistoryStore(this).list();
+            StringBuilder sb = new StringBuilder();
+            if (list.isEmpty()) {
+                sb.append("暂无运行过的任务\n");
+            } else {
+                int n = Math.min(5, list.size());
+                for (int i = 0; i < n; i++) {
+                    HistoryStore.Entry e = list.get(i);
+                    String mark = "running".equals(e.status) ? "🟢 进行中"
+                            : (e.ok ? "✓ 完成" : "✗ 失败");
+                    String title = e.title == null || e.title.isEmpty()
+                            ? "(空)" : e.title;
+                    if (title.length() > 30) title = title.substring(0, 30) + "…";
+                    sb.append(mark).append(" ").append(title).append("\n");
+                    sb.append(e.timeStr == null ? "" : e.timeStr);
+                    if (e.detail != null && !e.detail.isEmpty()) {
+                        sb.append(" · ").append(e.detail);
+                    }
+                    sb.append("\n\n");
+                }
+            }
+            // 规则待机思考：从最近一条任务状态推一条待机建议，不调模型。
+            if (!list.isEmpty()) {
+                HistoryStore.Entry last = list.get(0);
+                sb.append("待机思考：");
+                if ("running".equals(last.status)) {
+                    sb.append("上次任务还在跑，待机中继续等它结束。");
+                } else if (last.ok) {
+                    sb.append("上次任务已完成，待机中无新任务。");
+                } else {
+                    sb.append("上次任务未完成，待机时可准备重试或换个方法。");
+                }
+                sb.append("\n");
+            }
+            if (homeToolView != null) homeToolView.setText(sb.toString());
+            if (homeToolScroll != null) {
+                homeToolScroll.post(() -> homeToolScroll.fullScroll(
+                        android.view.View.FOCUS_UP));
+            }
+        } catch (Exception ignored) {}
+    }
+
     private LinearLayout buildHomePage() {
         homeSections = new java.util.HashMap<>();
         homeSections.put("status", buildStatusCard());
@@ -1508,6 +2006,155 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
         outer.addView(homeDetailWrap, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        // v4.04 横屏主页专属布局：左虚拟屏、右工具与代码；
+        // 平时隐藏，横屏主页才显示，竖屏与设置内容互不干扰。
+        // v4.14：外层改成竖向容器（上两栏、下输入框），原横向两栏
+        // 改名 homeLandWrap 留在容器内占权重，显隐统一改管外层，
+        // 避免横屏时外层横向排布把输入框挤到两栏旁边去。
+        homeLandOuter = new LinearLayout(this);
+        homeLandOuter.setOrientation(LinearLayout.VERTICAL);
+        homeLandOuter.setVisibility(View.GONE);
+        homeLandWrap = new LinearLayout(this);
+        homeLandWrap.setOrientation(LinearLayout.HORIZONTAL);
+        homeLandWrap.setVisibility(View.VISIBLE);
+        LinearLayout vdPane = new LinearLayout(this);
+        vdPane.setOrientation(LinearLayout.VERTICAL);
+        vdPane.setPadding(dp(8), dp(8), dp(8), dp(8));
+        TextView vdTitle = new TextView(this);
+        vdTitle.setText("虚拟屏");
+        vdTitle.setTextSize(16);
+        vdTitle.setPadding(dp(4), dp(4), dp(4), dp(8));
+        vdPane.addView(vdTitle);
+        homeVdView = new android.widget.ImageView(this);
+        homeVdView.setScaleType(
+                android.widget.ImageView.ScaleType.FIT_CENTER);
+        homeVdView.setBackgroundColor(android.graphics.Color.BLACK);
+        vdPane.addView(homeVdView, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        // v4.05 左待机：最近运行过的软件图标与名字，虚拟屏运行时隐藏
+        homeVdStandby = new LinearLayout(this);
+        homeVdStandby.setOrientation(LinearLayout.VERTICAL);
+        homeVdStandby.setGravity(Gravity.CENTER);
+        homeVdStandby.setVisibility(View.GONE);
+        homeVdIcon = new android.widget.ImageView(this);
+        homeVdIcon.setScaleType(
+                android.widget.ImageView.ScaleType.FIT_CENTER);
+        homeVdStandby.addView(homeVdIcon, new LinearLayout.LayoutParams(
+                dp(96), dp(96)));
+        homeVdAppName = new TextView(this);
+        homeVdAppName.setTextSize(16);
+        homeVdAppName.setGravity(Gravity.CENTER);
+        homeVdAppName.setPadding(dp(4), dp(12), dp(4), dp(4));
+        homeVdStandby.addView(homeVdAppName);
+        vdPane.addView(homeVdStandby, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        homeVdStatus = new TextView(this);
+        homeVdStatus.setTextSize(12);
+        homeVdStatus.setPadding(dp(4), dp(8), dp(4), dp(4));
+        vdPane.addView(homeVdStatus);
+        homeLandWrap.addView(vdPane, new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
+        LinearLayout toolPane = new LinearLayout(this);
+        toolPane.setOrientation(LinearLayout.VERTICAL);
+        toolPane.setPadding(dp(8), dp(8), dp(8), dp(8));
+        homeToolTitle = new TextView(this);
+        homeToolTitle.setText("智能体工具与代码");
+        homeToolTitle.setTextSize(16);
+        homeToolTitle.setPadding(dp(4), dp(4), dp(4), dp(8));
+        toolPane.addView(homeToolTitle);
+        homeToolView = new TextView(this);
+        homeToolView.setTextSize(11);
+        homeToolView.setTypeface(android.graphics.Typeface.MONOSPACE);
+        homeToolView.setPadding(dp(4), dp(4), dp(4), dp(4));
+        homeToolScroll = new android.widget.ScrollView(this);
+        homeToolScroll.addView(homeToolView);
+        toolPane.addView(homeToolScroll, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        homeLandWrap.addView(toolPane, new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
+        homeLandOuter.addView(homeLandWrap, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        // v4.14 横屏主页智能体输入框：主页就能下命令，不用切智能体页。
+        // 发送复用 startAgent（智能体页同一入口）：任务跑起来后，
+        // 右边工具日志实时显示，智能体页的对话日志仍可切过去看。
+        // v4.15（用户 11-03 亲定“输入框在右半边显示”）：输入框
+        // 不再通栏放底部，改放右窗（工具日志窗）底部——左边是
+        // 虚拟屏、右边是智能体，输入框跟智能体在同一边；右窗
+        // 是竖向布局（标题、滚动日志占权重、输入框贴底），
+        // 窗口 adjustResize 时键盘顶起，输入框自然跟到键盘上方。
+        LinearLayout landInputBar = new LinearLayout(this);
+        landInputBar.setOrientation(LinearLayout.HORIZONTAL);
+        landInputBar.setGravity(Gravity.CENTER_VERTICAL);
+        landInputBar.setBackground(bubbleBg(DyColor.surfaceVariant(this), 24));
+        landInputBar.setPadding(dp(6), dp(6), dp(6), dp(6));
+        homeLandInput = new EditText(this);
+        homeLandInput.setHint("在主页给智能体下命令");
+        homeLandInput.setTextSize(14);
+        homeLandInput.setSingleLine(true);
+        homeLandInput.setBackground(null);
+        homeLandInput.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_SEND);
+        homeLandInput.setOnEditorActionListener((v, actionId, event) -> {
+            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEND) {
+                sendHomeLandGoal();
+                return true;
+            }
+            return false;
+        });
+        LinearLayout.LayoutParams landGoalLp = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        landGoalLp.setMargins(dp(8), 0, dp(4), 0);
+        landInputBar.addView(homeLandInput, landGoalLp);
+        homeLandSendBtn = new Button(this);
+        homeLandSendBtn.setText("发送");
+        homeLandSendBtn.setTextSize(14);
+        homeLandSendBtn.setTextColor(DyColor.onPrimary(this));
+        homeLandSendBtn.setBackground(bubbleBg(DyColor.primary(this), 20));
+        homeLandSendBtn.setPadding(dp(20), dp(10), dp(20), dp(10));
+        homeLandSendBtn.setOnClickListener(v -> {
+            v.performHapticFeedback(
+                    android.view.HapticFeedbackConstants.VIRTUAL_KEY);
+            sendHomeLandGoal();
+        });
+        landInputBar.addView(homeLandSendBtn);
+        toolPane.addView(landInputBar, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        outer.addView(homeLandOuter, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.MATCH_PARENT));
+        // v4.14 真虚拟屏：主页左窗不再只是预览图，点按/滑动直接
+        // 转发到虚拟屏（FIT_CENTER 换算 + 后台走 VdInput，不占 UI 线程）。
+        homeVdView.setClickable(true);
+        homeVdView.setOnTouchListener(new View.OnTouchListener() {
+            float downX, downY;
+            long downAt;
+            @Override public boolean onTouch(View v, android.view.MotionEvent e) {
+                if (!VirtualDisplayManager.isActive()) return false;
+                if (e.getAction() == android.view.MotionEvent.ACTION_DOWN) {
+                    downX = e.getX();
+                    downY = e.getY();
+                    downAt = System.currentTimeMillis();
+                    return true;
+                }
+                if (e.getAction() != android.view.MotionEvent.ACTION_UP) {
+                    return true;
+                }
+                float upX = e.getX();
+                float upY = e.getY();
+                float[] p1 = mapVdPoint(v, downX, downY);
+                float[] p2 = mapVdPoint(v, upX, upY);
+                if (p1 == null || p2 == null) return true;
+                float dist = (float) Math.hypot(upX - downX, upY - downY);
+                if (dist > dp(24)) {
+                    int dur = (int) Math.max(100, Math.min(1000,
+                            System.currentTimeMillis() - downAt));
+                    forwardVdSwipe(p1[0], p1[1], p2[0], p2[1], dur);
+                } else {
+                    forwardVdTap(p1[0], p1[1]);
+                }
+                return true;
+            }
+        });
         return outer;
     }
 
@@ -1633,27 +2280,266 @@ public class MainActivity extends Activity {
         }
     }
 
+    // ---------- 横屏模式 v3.95 ----------
+    // 底部 tab 不动（用户 20:09 亲定）：横屏只重排内容区内部，
+    // 主页/远控变左右分栏，我的页居中限宽，智能体/终端满宽不变。
+    // 旋转走 onConfigurationChanged 重排，不重建 Activity，
+    // 所以输入草稿、滚动位置、当前详情都不丢。
+    private boolean landscapeLayout = false;
+    private String homeCurrentKey = null;
+    private String remoteCurrentKey = null;
+
+    // v3.96 横屏 tab 移到右侧（用户 20:20 亲定，覆盖 3.95 的“底部不动”）：
+    // 竖屏 tab 仍在底部横向胶囊；横屏 tab 改成右侧竖栏，图标在栏内
+    // 纵向排列、方向正对横屏（不是横着的），内容区右留 84dp 避让。
+    private void applyTabBarLayout() {
+        if (tabBarView == null) return;
+        tabBarView.animate().cancel();
+        tabBarView.setTranslationX(0);
+        tabBarView.setTranslationY(0);
+        tabBarView.setAlpha(1f);
+        tabBarView.setOrientation(landscapeLayout
+                ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+        android.widget.FrameLayout.LayoutParams tabLp;
+        if (landscapeLayout) {
+            tabLp = new android.widget.FrameLayout.LayoutParams(
+                    android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+                    android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+                    android.view.Gravity.RIGHT | android.view.Gravity.CENTER_VERTICAL);
+            tabLp.setMargins(0, dp(16), dp(16), dp(16));
+        } else {
+            tabLp = new android.widget.FrameLayout.LayoutParams(
+                    android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                    android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+                    android.view.Gravity.BOTTOM | android.view.Gravity.CENTER_HORIZONTAL);
+            tabLp.setMargins(dp(16), 0, dp(16), dp(16));
+        }
+        tabBarView.setLayoutParams(tabLp);
+        TabIconView[] tabs = {tabHome, tabRemote, tabAgent, tabTerm, tabMy};
+        for (TabIconView t : tabs) {
+            if (t == null) continue;
+            LinearLayout.LayoutParams lp;
+            if (landscapeLayout) {
+                lp = new LinearLayout.LayoutParams(dp(56), dp(46));
+                lp.setMargins(0, dp(2), 0, dp(2));
+            } else {
+                lp = new LinearLayout.LayoutParams(0, dp(46), 1f);
+                lp.setMargins(dp(2), 0, dp(2), 0);
+            }
+            t.setLayoutParams(lp);
+        }
+        tabBarView.requestLayout();
+    }
+
+    // v3.98 横屏全屏（用户 20:40 亲定）：横屏时隐藏系统通知栏
+    // （状态栏），只留 App 自己的内容；竖屏恢复正常显示。
+    // v3.99 真全屏（用户 20:44 纠正：别只看“隐藏”两个字，要像游戏
+    // 那样的真全屏）：3.98 只藏了状态栏，导航栏/手势条还在，
+    // 那不算真全屏；改后横屏藏的是整套系统栏——状态栏 +
+    // 导航栏一起藏，内容真正铺满全屏，边缘滑动才临时呼出
+    // 系统栏、松手自动再藏，竖屏恢复两栏正常显示。
+    private void applyFullscreen() {
+        try {
+            android.view.Window w = getWindow();
+            if (w == null) return;
+            if (android.os.Build.VERSION.SDK_INT >= 30) {
+                w.setDecorFitsSystemWindows(!landscapeLayout);
+                android.view.WindowInsetsController c = w.getInsetsController();
+                if (c != null) {
+                    if (landscapeLayout) {
+                        c.hide(android.view.WindowInsets.Type.systemBars());
+                        c.setSystemBarsBehavior(
+                                android.view.WindowInsetsController
+                                        .BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                    } else {
+                        c.show(android.view.WindowInsets.Type.systemBars());
+                    }
+                }
+            } else {
+                android.view.View decor = w.getDecorView();
+                int flags = android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE;
+                if (landscapeLayout) {
+                    flags |= android.view.View.SYSTEM_UI_FLAG_FULLSCREEN
+                            | android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                            | android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                            | android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                            | android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
+                }
+                decor.setSystemUiVisibility(flags);
+            }
+        } catch (Exception ignored) {}
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        // v3.99：拿到焦点时重申真全屏（切后台、弹系统框回来后，
+        // 系统栏可能被恢复显示，这里按当前方向重新藏/显示一次）
+        if (hasFocus) {
+            try { applyFullscreen(); } catch (Exception ignored) {}
+        }
+    }
+
+    private void applyContentPadding() {
+        if (contentView == null) return;
+        // 横屏右侧 tab 宽约 68dp + 右边距 16dp = 84dp，内容右留白避让；
+        // tab 隐藏时（输入中）不留白，竖屏时内容留白为 0（各页自带底部留白）。
+        int right = (landscapeLayout && !tabBarHidden) ? dp(84) : 0;
+        contentView.setPadding(0, 0, right, 0);
+        contentView.requestLayout();
+    }
+
+    private String orientationSetting() {
+        try {
+            return getSharedPreferences("ui", MODE_PRIVATE)
+                    .getString("orientation", "system");
+        } catch (Exception e) { return "system"; }
+    }
+
+    private boolean isLandscapeLayout() {
+        String s = orientationSetting();
+        if ("landscape".equals(s)) return true;
+        if ("portrait".equals(s)) return false;
+        android.content.res.Configuration cfg = getResources().getConfiguration();
+        if (cfg.orientation != android.content.res.Configuration.ORIENTATION_LANDSCAPE)
+            return false;
+        float wDp = getResources().getDisplayMetrics().widthPixels
+                / getResources().getDisplayMetrics().density;
+        return wDp >= 600;
+    }
+
+    private int landscapeMenuWidthDp() {
+        float wDp = getResources().getDisplayMetrics().widthPixels
+                / getResources().getDisplayMetrics().density;
+        return (int) Math.min(320, wDp * 0.40);
+    }
+
+    private void applyOrientationLayout() {
+        if (pageHome == null || homeMenuScroll == null || homeDetailWrap == null
+                || remoteMenuScroll == null || remoteDetailWrap == null) return;
+        boolean land = isLandscapeLayout();
+        if (land == landscapeLayout && pageHome.getParent() != null
+                && homeDetailWrap.getChildCount() >= 0) {
+            // 首次进入时 landscapeLayout=false 且 land=false 也会到这里，
+            // 那是竖屏默认态，无需重排；横屏首次进入 land=true 时才往下走。
+            if (!land) return;
+            if (homeMenuScroll.getVisibility() == View.VISIBLE
+                    && homeDetailWrap.getVisibility() == View.VISIBLE) return;
+        }
+        landscapeLayout = land;
+        // v3.96：tab 先换位置（底部横向 ↔ 右侧竖栏），内容再重排
+        try { applyTabBarLayout(); } catch (Exception ignored) {}
+        try { applyContentPadding(); } catch (Exception ignored) {}
+        // v3.98：横屏全屏、竖屏恢复状态栏
+        try { applyFullscreen(); } catch (Exception ignored) {}
+        // 主页
+        LinearLayout homeOuter = (LinearLayout) homeMenuScroll.getParent();
+        homeOuter.setOrientation(land ? LinearLayout.HORIZONTAL
+                : LinearLayout.VERTICAL);
+        homeMenuScroll.setLayoutParams(land
+                ? new LinearLayout.LayoutParams(dp(landscapeMenuWidthDp()),
+                        LinearLayout.LayoutParams.MATCH_PARENT)
+                : new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        homeDetailWrap.setLayoutParams(land
+                ? new LinearLayout.LayoutParams(0,
+                        LinearLayout.LayoutParams.MATCH_PARENT, 1f)
+                : new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        // 远控
+        LinearLayout remoteOuter = (LinearLayout) remoteMenuScroll.getParent();
+        remoteOuter.setOrientation(land ? LinearLayout.HORIZONTAL
+                : LinearLayout.VERTICAL);
+        remoteMenuScroll.setLayoutParams(land
+                ? new LinearLayout.LayoutParams(dp(landscapeMenuWidthDp()),
+                        LinearLayout.LayoutParams.MATCH_PARENT)
+                : new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        remoteDetailWrap.setLayoutParams(land
+                ? new LinearLayout.LayoutParams(0,
+                        LinearLayout.LayoutParams.MATCH_PARENT, 1f)
+                : new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        // 我的页：横屏居中限宽 720dp
+        try {
+            android.widget.ScrollView myWrap =
+                    (android.widget.ScrollView) pageMy.getChildAt(0);
+            LinearLayout myInner = (LinearLayout) myWrap.getChildAt(0);
+            float wDp = getResources().getDisplayMetrics().widthPixels
+                    / getResources().getDisplayMetrics().density;
+            int side = land ? Math.max(0, (int) ((wDp - 720) / 2)) : 0;
+            myInner.setPadding(dp(side), dp(8), dp(side), dp(100));
+        } catch (Exception ignored) {}
+        if (land) {
+            // v4.04 横屏主页：不显示设置内容（菜单与详情全藏），
+            // 只显示左虚拟屏、右工具与代码；远控页仍走原分栏。
+            if (homeLandOuter != null) {
+                homeMenuScroll.setVisibility(View.GONE);
+                homeDetailWrap.setVisibility(View.GONE);
+                homeLandOuter.setVisibility(View.VISIBLE);
+                startHomeLandTick();
+            } else {
+                homeMenuScroll.setVisibility(View.VISIBLE);
+            }
+            remoteMenuScroll.setVisibility(View.VISIBLE);
+            if (remoteCurrentKey == null) showRemoteSection("svc");
+            else showRemoteSection(remoteCurrentKey);
+        } else {
+            // 回竖屏：主页恢复菜单/详情，横屏专属布局收起停表
+            if (homeLandOuter != null) homeLandOuter.setVisibility(View.GONE);
+            stopHomeLandTick();
+            if (homeCurrentKey != null) showHomeSection(homeCurrentKey);
+            else { homeDetailWrap.setVisibility(View.GONE);
+                homeMenuScroll.setVisibility(View.VISIBLE); }
+            if (remoteCurrentKey != null) showRemoteSection(remoteCurrentKey);
+            else { remoteDetailWrap.setVisibility(View.GONE);
+                remoteMenuScroll.setVisibility(View.VISIBLE); }
+        }
+        // v4.01：方向变化重算待机——横屏起 60 秒计时，竖屏退出待机
+        try {
+            if (land) resetStandbyTimer();
+            else {
+                standbyHandler.removeCallbacks(standbyEnter);
+                if (standbyOn) exitStandby();
+            }
+        } catch (Exception ignored) {}
+    }
+
+    @Override
+    public void onConfigurationChanged(
+            android.content.res.Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        try { applyOrientationLayout(); } catch (Exception ignored) {}
+    }
+
     private void showHomeSection(String key) {
+        // v4.04：横屏主页不显示设置内容，详情区已不存在，直接不处理
+        if (landscapeLayout) return;
         LinearLayout sec = homeSections.get(key);
         if (sec == null) return;
+        homeCurrentKey = key;
         if (sec.getParent() != null) {
             ((android.view.ViewGroup) sec.getParent()).removeView(sec);
         }
         homeDetailWrap.removeAllViews();
-        Button back = smallBtn("← 返回");
-        back.setOnClickListener(v -> showHomeMenu());
-        homeDetailWrap.addView(back);
+        if (!landscapeLayout) {
+            Button back = smallBtn("← 返回");
+            back.setOnClickListener(v -> showHomeMenu());
+            homeDetailWrap.addView(back);
+        }
         ScrollView sv = new ScrollView(this);
         sv.setClipToPadding(false);
         sv.setPadding(0, 0, 0, dp(100)); // v3.20：底部避让悬浮胶囊tab
         sv.addView(sec);
         homeDetailWrap.addView(sv, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
-        homeMenuScroll.setVisibility(View.GONE);
+        if (!landscapeLayout) homeMenuScroll.setVisibility(View.GONE);
+        else homeMenuScroll.setVisibility(View.VISIBLE);
         homeDetailWrap.setVisibility(View.VISIBLE);
     }
 
     private void showHomeMenu() {
+        if (landscapeLayout) return; // 横屏下菜单一直在，无需返回
         homeDetailWrap.setVisibility(View.GONE);
         homeMenuScroll.setVisibility(View.VISIBLE);
     }
@@ -2096,7 +2982,7 @@ public class MainActivity extends Activity {
         refreshAgentModels();
 
         // 消息区在上，占满剩余空间
-        agentScrollView = new ScrollView(this);
+        agentScrollView = new FollowScrollView(this);
         agentMsgBox = new LinearLayout(this);
         agentMsgBox.setOrientation(LinearLayout.VERTICAL);
         agentMsgBox.setPadding(0, 0, 0, dp(8));
@@ -2227,7 +3113,24 @@ public class MainActivity extends Activity {
             }
             return false;
         });
-        // v2.83：删掉焦点监听，只认键盘显隐（防打架）
+        // v4.12：tab 隐藏改焦点驱动（用户 11-03 亲选）——点输入框拿到
+        // 焦点就先藏 tab，键盘还没升起来 tab 已经走了，布局在键盘
+        // 动画开始前就稳定了，不再是键盘升到一半才藏 tab、tab 滑出
+        // 和输入框边距、键盘三路同时动。只做“藏”不做“显”：失焦
+        // 本身不显示 tab，显示只走键盘收起后的防抖——v2.83 删焦点
+        // 监听就是因为焦点和键盘各管各的显隐会打架，这次焦点只进
+        // 不出，键盘只出（防抖后），两边不再抢方向。发送后 refocus
+        // 保持焦点（v2.88），tab 本来就该继续藏着，不算 bug。
+        // 输入框边距仍跟键盘走（v4.10/4.11）：焦点时只藏 tab，
+        // 边距等键盘升起再滑，输入框只动一次、不先下滑再上移。
+        agentGoal.setOnFocusChangeListener((v, hasFocus) -> {
+            if (hasFocus) {
+                if (pendingShowTab != null && tabBarView != null) {
+                    tabBarView.removeCallbacks(pendingShowTab);
+                }
+                hideTabBar();
+            }
+        });
         LinearLayout.LayoutParams goalLp = new LinearLayout.LayoutParams(
                 0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
         goalLp.setMargins(dp(8), 0, dp(4), 0);
@@ -2247,6 +3150,9 @@ public class MainActivity extends Activity {
             if (agentThread != null && agentThread.isAlive()) {
                 agentStop = true;
                 agentLog("🛑 已请求停止");
+            } else if (chatThread != null && chatThread.isAlive()) {
+                if (chatStreamHandle != null) chatStreamHandle.cancel();
+                agentLog("🛑 已请求停止输出");
             } else {
                 startAgent();
             }
@@ -2256,6 +3162,10 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT);
         // v2.94：输入框底部留空，避开悬浮 tab（消息可滑到 tab 下，输入框不行）
+        // v4.10 修：84dp 只是给竖屏底部 tab 留的，键盘弹起时 tab 已隐藏、
+        // 横屏时 tab 在右侧——这两种情况下 84dp 全是死空地，输入框就漂在
+        // 键盘上方 84dp 处（用户 11-03 实拍）。底部边距改由键盘显隐监听
+        // 动态调（见 updateInputBarBottomMargin），这里只留默认态。
         barLp.setMargins(0, dp(8), 0, dp(84));
         page.addView(inputBar, barLp);
 
@@ -2799,6 +3709,23 @@ public class MainActivity extends Activity {
                         "技能卡", json));
                 log("技能卡 JSON 已复制到剪贴板，可分享给他人导入");
             });
+            android.widget.Switch swEn = new android.widget.Switch(this);
+            swEn.setText("启用");
+            swEn.setChecked(c.enabled);
+            swEn.setOnCheckedChangeListener((bv, checked) -> {
+                new SkillCardStore(this).setEnabled(cid, checked);
+                log(checked ? "📇 已启用技能卡（下次任务起注入）"
+                        : "📇 已停用技能卡（不再注入提示词，卡未删除）");
+            });
+            btnRow.addView(swEn);
+            Button bSess = smallBtn(SkillCardStore.isSessionDisabled(cid)
+                    ? "本次已禁用" : "本次禁用");
+            bSess.setOnClickListener(v -> {
+                boolean cur = SkillCardStore.isSessionDisabled(cid);
+                SkillCardStore.setSessionDisabled(cid, !cur);
+                refreshSkillCards();
+            });
+            btnRow.addView(bSess);
             Button bRb = smallBtn("\u56de\u6eda");
             bRb.setOnClickListener(v -> {
                 SkillCardStore rbStore = new SkillCardStore(this);
@@ -2934,7 +3861,8 @@ public class MainActivity extends Activity {
             skillsBox.addView(row);
 
             View div = new View(this);
-            div.setBackgroundColor(0xFFEEEEEE);
+            // v4.07 分割线跟 DyColor 走，夜间不再是浅灰线
+            div.setBackgroundColor(DyColor.outline(this));
             skillsBox.addView(div, new LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT, dp(1)));
         }
@@ -3222,11 +4150,13 @@ public class MainActivity extends Activity {
         remoteSections = new java.util.HashMap<>();
         remoteSections.put("svc", buildSvcCard());
         remoteSections.put("cf", buildCfCard());
-        remoteSections.put("clashapp", buildClashAppCard());
+        remoteSections.put("tsnet", buildTsnetCard());
+        remoteSections.put("relay", buildRelayCard());
         remoteSections.put("muse", buildMuseCard());
         remoteSections.put("tg", buildTgCard());
         remoteSections.put("api", buildApiCard());
         remoteSections.put("task", buildRemoteTaskCard());
+        remoteSections.put("settings", buildSettingsCard());
 
         LinearLayout outer = new LinearLayout(this);
         outer.setOrientation(LinearLayout.VERTICAL);
@@ -3238,12 +4168,16 @@ public class MainActivity extends Activity {
         remoteSvcSub = addMenuRow(remoteList, "🌐", "远程控制服务",
                 "HTTP 服务开关（端口 " + AgentService.getPort(this) + "）",
                 v -> showRemoteSection("svc"));
+        addMenuRow(remoteList, "⚙️", "统一设置", "分组设置 + 变更审计，旧卡入口保留跳转",
+                v -> showRemoteSection("settings"));
         addMenuRow(remoteList, "☁️", "云端操控", "Tailscale 内网被控",
                 v -> showRemoteSection("muse"));
         addMenuRow(remoteList, "🌩️", "Cloudflare 隧道（内置）", "cloudflared 打包进软件，快速隧道",
                 v -> showRemoteSection("cf"));
-        addMenuRow(remoteList, "🧩", "clash 按 App 直连", "选中的 App 走直连，其余走代理",
-                v -> showRemoteSection("clashapp"));
+        addMenuRow(remoteList, "🛡️", "Tailscale 内置节点", "tsnet 小进程加入 tailnet，不依赖外部 App",
+                v -> showRemoteSection("tsnet"));
+        addMenuRow(remoteList, "🔁", "Muse 服务器模式", "手机反向连 Muse 中继，出站长连接",
+                v -> showRemoteSection("relay"));
         addMenuRow(remoteList, "✈️", "Telegram 机器人", "Bot 公网控制",
                 v -> showRemoteSection("tg"));
         addMenuRow(remoteList, "🔌", "API 接口", "接口文档",
@@ -3268,26 +4202,32 @@ public class MainActivity extends Activity {
     private void showRemoteSection(String key) {
         LinearLayout sec = remoteSections.get(key);
         if (sec == null) return;
+        remoteCurrentKey = key;
         if (sec.getParent() != null) {
             ((android.view.ViewGroup) sec.getParent()).removeView(sec);
         }
         remoteDetailWrap.removeAllViews();
-        Button back = smallBtn("← 返回");
-        back.setOnClickListener(v -> showRemoteMenu());
-        remoteDetailWrap.addView(back);
+        if (!landscapeLayout) {
+            Button back = smallBtn("← 返回");
+            back.setOnClickListener(v -> showRemoteMenu());
+            remoteDetailWrap.addView(back);
+        }
         ScrollView sv = new ScrollView(this);
         sv.setClipToPadding(false);
         sv.setPadding(0, 0, 0, dp(100)); // v3.20：底部避让悬浮胶囊tab
         sv.addView(sec);
         remoteDetailWrap.addView(sv, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
-        remoteMenuScroll.setVisibility(View.GONE);
+        if (!landscapeLayout) remoteMenuScroll.setVisibility(View.GONE);
+        else remoteMenuScroll.setVisibility(View.VISIBLE);
         remoteDetailWrap.setVisibility(View.VISIBLE);
         if ("task".equals(key)) startRemoteTaskRefresh();
         else stopRemoteTaskRefresh();
+        if ("settings".equals(key)) refreshSettingsInfo();
     }
 
     private void showRemoteMenu() {
+        if (landscapeLayout) return; // 横屏下菜单一直在，无需返回
         stopRemoteTaskRefresh();
         remoteDetailWrap.setVisibility(View.GONE);
         remoteMenuScroll.setVisibility(View.VISIBLE);
@@ -3368,14 +4308,96 @@ public class MainActivity extends Activity {
         remoteTaskLog.setText(sb.toString().trim());
     }
 
+    // ---------- v3.78 Muse 服务器模式（反向连接）卡 ----------
+    private TextView relayInfo;
+    private MuseRelayClient relayClient;
+
+    private LinearLayout buildRelayCard() {
+        LinearLayout c = card();
+        c.addView(cardTitle("Muse 服务器模式（反向连接）"));
+        c.addView(grayText(
+                "旧远控是手机做服务器、Muse 拨进来（要 Tailscale/隧道）。\n"
+                        + "这个模式反过来：手机主动出站长轮询连中继服务器，\n"
+                        + "命令走这条出站连接下发，手机不用开 inbound 端口。\n"
+                        + "中继地址填 https（生产），http 只限局域网测试；\n"
+                        + "token 与中继服务器启动参数一致，无 token 不启动。\n"
+                        + "中继原型在云端 muse-relay-server.py，可跑在公网主机、\n"
+                        + "或经 cloudflared 隧道暴露给手机填。"));
+        final android.widget.EditText relayUrl = new android.widget.EditText(this);
+        relayUrl.setHint("中继地址，如 https://xxx.trycloudflare.com");
+        relayUrl.setTextSize(13);
+        relayUrl.setSingleLine(true);
+        relayUrl.setText(MuseRelayClient.getUrl(this));
+        c.addView(relayUrl);
+        final android.widget.EditText relayToken = new android.widget.EditText(this);
+        relayToken.setHint("中继 token（只存本机）");
+        relayToken.setTextSize(13);
+        relayToken.setSingleLine(true);
+        relayToken.setInputType(android.text.InputType.TYPE_CLASS_TEXT
+                | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        relayToken.setText(MuseRelayClient.getToken(this));
+        c.addView(relayToken);
+        relayInfo = new TextView(this);
+        relayInfo.setTextSize(13);
+        relayInfo.setTextColor(TEXT_GRAY);
+        relayInfo.setText("未启动");
+        c.addView(relayInfo);
+        Button bSave = btn("保存中继地址与 token");
+        bSave.setOnClickListener(v -> {
+            MuseRelayClient.save(this, relayUrl.getText().toString(),
+                    relayToken.getText().toString());
+            Toast.makeText(this, "已保存（token 只存本机）", Toast.LENGTH_SHORT).show();
+        });
+        c.addView(bSave);
+        Button bStart = btn("启动反向连接");
+        bStart.setOnClickListener(v -> {
+            MuseRelayClient.save(this, relayUrl.getText().toString(),
+                    relayToken.getText().toString());
+            if (relayClient == null) {
+                relayClient = new MuseRelayClient(this, new MuseRelayClient.Listener() {
+                    @Override
+                    public void onLog(String s) {
+                        runOnUiThread(() -> {
+                            if (relayInfo != null) relayInfo.setText(s);
+                        });
+                    }
+
+                    @Override
+                    public void onStatus(String s) {
+                        runOnUiThread(() -> {
+                            if (relayInfo != null) relayInfo.setText(s);
+                        });
+                    }
+                });
+            }
+            relayClient.start();
+        });
+        c.addView(bStart);
+        Button bStop = btn("停止反向连接");
+        bStop.setOnClickListener(v -> {
+            if (relayClient != null) relayClient.stop();
+            if (relayInfo != null) relayInfo.setText("已停止");
+        });
+        c.addView(bStop);
+        Button bRefresh = btn("刷新状态");
+        bRefresh.setOnClickListener(v -> {
+            if (relayClient != null && relayInfo != null) {
+                relayInfo.setText(relayClient.status());
+            }
+        });
+        c.addView(bRefresh);
+        return c;
+    }
+
     // ---------- v3.67 内置 Cloudflare 隧道卡 ----------
     private TextView cfInfo;
 
     private void refreshCfCard() {
         if (cfInfo == null) return;
         cfInfo.setText(CloudflareTunnel.statusText(this)
-                + "\n\n说明：快速隧道地址每次启动就换，本版先手动同步："
-                + "把上面地址发给云端 Muse，它用该地址探 /status，仍要过远控 token 鉴权。"
+                + "\n\n说明：快速隧道地址每次启动就换，断了会自动重连（5/10/20/40/60 秒退避）；"
+                + "地址变了卡面会标旧地址提醒，仍需手动把新地址发给云端 Muse，"
+                + "它用新地址探 /status，仍要过远控 token 鉴权。"
                 + "隧道本身不是鉴权，地址外泄不等于能操作手机。");
     }
 
@@ -3400,15 +4422,6 @@ public class MainActivity extends Activity {
             cfInfo.postDelayed(this::refreshCfCard, 10000);
         });
         c.addView(bProxy);
-        Button bRule = btn("加直连规则（重启 clash）");
-        bRule.setOnClickListener(v -> {
-            cfInfo.setText("正在给 clash 加 trycloudflare 直连规则（先备份，失败自动回滚）…");
-            new Thread(() -> {
-                final ClashDirectRule.Result r = ClashDirectRule.apply();
-                cfInfo.post(() -> cfInfo.setText(r.message));
-            }, "cf-direct-rule").start();
-        });
-        c.addView(bRule);
         Button bStop = btn("停止隧道");
         bStop.setOnClickListener(v -> {
             CloudflareTunnel.stop(this);
@@ -3431,96 +4444,281 @@ public class MainActivity extends Activity {
         Button bRefresh = btn("刷新状态");
         bRefresh.setOnClickListener(v -> refreshCfCard());
         c.addView(bRefresh);
+        Button bClearChanged = btn("地址已同步，清除提醒");
+        bClearChanged.setOnClickListener(v -> {
+            CloudflareTunnel.clearUrlChanged(this);
+            refreshCfCard();
+        });
+        c.addView(bClearChanged);
         cfInfo.postDelayed(this::refreshCfCard, 500);
         return c;
     }
 
-    // ---------- v3.70 clash 按 App 直连卡 ----------
-    private TextView clashAppInfo;
-    private LinearLayout clashAppBox;
-    private java.util.Set<String> clashAppSelection = new java.util.HashSet<>();
+    // ---------- v3.82 Tailscale 内置节点卡 + v3.84 网页登录 ----------
+    private TextView tsnetInfo;
+    private EditText tsnetKeyInput;
+    private LinearLayout tsnetLoginBox;
+    private TextView tsnetLoginUrl;
+    private Button bOpenLogin, bCopyLogin, bRefreshLogin;
+    private boolean tsnetLoginPolling = false;
+    // v3.88 自动跳转：TsnetNode 协议行到达即通知，不再依赖 3 秒/10 秒两次
+    // 预定刷新；监听者只在 Activity resumed 时注册，paused 时注销，弱引用
+    // 持有、杜绝 Activity 泄漏；通知到达切 UI 线程刷卡面并视情况自动跳转。
+    private final TsnetAutoJump tsnetAutoJump = new TsnetAutoJump();
+    private volatile boolean activityResumed = false;
+    private final TsnetNode.TsnetListener tsnetListener = new TsnetNode.TsnetListener() {
+        @Override
+        public void onTsnetChanged() {
+            try {
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (isFinishing()) {
+                            return;
+                        }
+                        refreshTsnetCard();
+                        maybeAutoJumpLogin();
+                    }
+                });
+            } catch (Exception ignored) {
+            }
+        }
+    };
 
-    private void refreshClashAppRows() {
-        if (clashAppBox == null) return;
-        clashAppInfo.setText("正在读已装应用…");
-        new Thread(() -> {
-            final java.util.List<ClashAppBypass.AppItem> apps = ClashAppBypass.listApps(this);
-            final java.util.Set<String> sel = ClashAppBypass.loadSelection(this);
-            clashAppSelection = new java.util.HashSet<>(sel);
-            clashAppBox.post(() -> {
-                clashAppBox.removeAllViews();
-                if (apps.isEmpty()) {
-                    clashAppBox.addView(grayText("没读到应用，点刷新重试"));
+    /** v3.88 自动跳转：链接首次到达且 Activity 在前台、tsnet 卡可见时，
+     * 自动跳浏览器打开该链接（同一链接只跳一次；链接清空/过期后 guard
+     * 复位，新链接可再跳）。Activity 不在前台或卡不可见时绝不后台拉起
+     * （Android 10+ 后台启动限制，且会吓用户一跳），只刷卡面、等用户
+     * 回来点手动按钮；手动“在浏览器打开”“复制链接”按钮全部保留做后备。
+     * 可见性判断用 tsnetInfo.isShown()：只有卡在窗口内且可见链完整时才为真，
+     * 用户切到别的分区时卡不可见，不会误跳。 */
+    private void maybeAutoJumpLogin() {
+        String u = TsnetNode.getLoginUrl();
+        if (u == null || u.isEmpty()) {
+            tsnetAutoJump.reset();
+            return;
+        }
+        if (!activityResumed) {
+            return;
+        }
+        if (tsnetInfo == null || !tsnetInfo.isShown()) {
+            return;
+        }
+        if (!tsnetAutoJump.shouldJump(u)) {
+            return;
+        }
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(u)));
+        } catch (Exception e) {
+            // 拉起失败时复位 guard，下次通知到达可重试；同时把链接贴到
+            // 剪贴板，用户不用回卡面找按钮、直接去浏览器粘贴即可。
+            tsnetAutoJump.reset();
+            try {
+                android.content.ClipboardManager cm = (android.content.ClipboardManager)
+                        getSystemService(CLIPBOARD_SERVICE);
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("tsnet-login-url", u));
+            } catch (Exception ignored) {
+            }
+            Toast.makeText(this, "打不开浏览器，已复制链接，去浏览器粘贴打开", Toast.LENGTH_SHORT).show();
+        }
+    }
+    private final Runnable tsnetLoginPoll = new Runnable() {
+        @Override
+        public void run() {
+            tsnetLoginPolling = false;
+            refreshTsnetCard();
+        }
+    };
+
+    private void refreshTsnetCard() {
+        if (tsnetInfo == null) return;
+        tsnetInfo.setText(TsnetNode.statusText(this)
+                + "\n\n说明：节点加入你的 tailnet 后，tailnet 内设备可用 tailnet IP:端口探 /status，"
+                + "仍要过远控 X-Token 鉴权，tailnet 只换传输层；auth key 只存本机私有目录，"
+                + "不进日志、不进 /status，卡面只显掩码；没有 auth key 也能点“网页登录”，"
+                + "链接一到、若本页在前台会自动跳浏览器打开授权，授权后自动上线，"
+                + "没自动跳出时点卡面按钮手动打开；登录链接只在卡面显示，"
+                + "不进日志、不进 /status、不走聊天远控；节点状态存 noBackupFilesDir，"
+                + "备份恢复不会冒充另一台设备；外部 Tailscale App 不用再装、不用再开后台开关，"
+                + "与 Cloudflare 隧道可并存，两条路互不干扰。");
+        if (tsnetKeyInput != null && !tsnetKeyInput.isFocused()) {
+            // v3.82 旧瑕疵顺带修：输入框聚焦时不重写掩码，不再覆盖用户正在打的字。
+            String m = TsnetNode.maskAuthKey(TsnetNode.getAuthKey(this));
+            tsnetKeyInput.setText(m);
+        }
+        if (tsnetLoginBox != null) {
+            // v3.87：先判过期态再判等待态（过期分支已复位 loginWaiting，此处
+            // 双保险，过期后绝不再显示“正在拉取”、重拉按钮一定可见）。
+            if (TsnetNode.isLoginExpired()) {
+                tsnetLoginBox.setVisibility(android.view.View.VISIBLE);
+                tsnetLoginUrl.setText("登录链接已过期，点下方按钮重新获取。");
+                bOpenLogin.setVisibility(android.view.View.GONE);
+                bCopyLogin.setVisibility(android.view.View.GONE);
+                bRefreshLogin.setVisibility(android.view.View.VISIBLE);
+            } else if (TsnetNode.isLoginWaiting()) {
+                String u = TsnetNode.getLoginUrl();
+                tsnetLoginBox.setVisibility(android.view.View.VISIBLE);
+                String waitText = "正在向控制面拉取登录链接…";
+                String st = TsnetNode.getLoginStatus();
+                if (u.isEmpty() && st != null && !st.isEmpty()) {
+                    waitText += "\n控制面状态：" + st;
                 }
-                for (ClashAppBypass.AppItem it : apps) {
-                    LinearLayout row = new LinearLayout(this);
-                    row.setOrientation(LinearLayout.HORIZONTAL);
-                    TextView tv = new TextView(this);
-                    tv.setText(it.label + "\n" + it.pkg);
-                    tv.setTextSize(13);
-                    tv.setTextColor(TEXT_DARK);
-                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0,
-                            LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-                    row.addView(tv, lp);
-                    android.widget.Switch sw = new android.widget.Switch(this);
-                    sw.setChecked(clashAppSelection.contains(it.pkg));
-                    sw.setOnCheckedChangeListener((b, checked) -> {
-                        if (checked) clashAppSelection.add(it.pkg);
-                        else clashAppSelection.remove(it.pkg);
-                    });
-                    row.addView(sw);
-                    clashAppBox.addView(row);
-                }
-                clashAppInfo.setText("已选 " + clashAppSelection.size() + " 个 App。"
-                        + "勾选只改选单，点下面应用才生效；"
-                        + "选 GSIC 本身时 cloudflared 也直连（子进程同 UID）。"
-                        + "只对本机 App 生效，热点下设备不受影响；DNS 仍走 clash。");
-            });
-        }, "clash-app-list").start();
+                tsnetLoginUrl.setText(u.isEmpty() ? waitText : u);
+                int vis = u.isEmpty() ? android.view.View.GONE : android.view.View.VISIBLE;
+                bOpenLogin.setVisibility(vis);
+                bCopyLogin.setVisibility(vis);
+                bRefreshLogin.setVisibility(android.view.View.GONE);
+            } else {
+                tsnetLoginBox.setVisibility(android.view.View.GONE);
+            }
+        }
+        // 等授权期间每 3 秒刷一次卡面，IP 一到自动切运行态；单链防重复挂接。
+        if (TsnetNode.isLoginWaiting()) {
+            if (!tsnetLoginPolling) {
+                tsnetLoginPolling = true;
+                tsnetInfo.postDelayed(tsnetLoginPoll, 3000);
+            }
+        } else {
+            tsnetLoginPolling = false;
+            tsnetInfo.removeCallbacks(tsnetLoginPoll);
+        }
     }
 
-    private LinearLayout buildClashAppCard() {
+    private LinearLayout buildTsnetCard() {
         LinearLayout c = card();
-        c.addView(cardTitle("clash 按 App 直连"));
-        clashAppInfo = new TextView(this);
-        clashAppInfo.setTextSize(14);
-        clashAppInfo.setTextColor(TEXT_DARK);
-        clashAppInfo.setText("按 App 选直连：选中 App 的流量走正常路由直连，"
-                + "其余 App 仍走 clash 代理；DNS 仍走 clash，不会断网。"
-                + "机制是 iptables 按 UID 豁免（同 root/Tailscale 豁免），"
-                + "不是 mihomo 的进程名规则。先点刷新应用列表，再勾选、应用。");
-        c.addView(clashAppInfo);
-        clashAppBox = new LinearLayout(this);
-        clashAppBox.setOrientation(LinearLayout.VERTICAL);
-        c.addView(clashAppBox);
-        Button bList = btn("刷新应用列表");
-        bList.setOnClickListener(v -> refreshClashAppRows());
-        c.addView(bList);
-        Button bApply = btn("应用直连设置（不重启 clash）");
-        bApply.setOnClickListener(v -> {
-            clashAppInfo.setText("正在应用直连设置（写 UID 文件、打钩子、即时插 iptables）…");
-            new Thread(() -> {
-                final ClashAppBypass.Result r = ClashAppBypass.apply(this,
-                        new java.util.HashSet<>(clashAppSelection));
-                clashAppInfo.post(() -> clashAppInfo.setText(r.message));
-            }, "clash-app-apply").start();
+        c.addView(cardTitle("Tailscale 内置节点（Go 小进程）"));
+        tsnetInfo = new TextView(this);
+        tsnetInfo.setTextSize(14);
+        tsnetInfo.setTextColor(TEXT_DARK);
+        c.addView(tsnetInfo);
+        tsnetKeyInput = new EditText(this);
+        tsnetKeyInput.setHint("粘贴 Tailscale auth key（首登需要，保存后只显掩码）");
+        tsnetKeyInput.setTextSize(14);
+        c.addView(tsnetKeyInput);
+        Button bSave = btn("保存 auth key");
+        bSave.setOnClickListener(v -> {
+            String t = tsnetKeyInput.getText().toString().trim();
+            if (t.isEmpty()) {
+                Toast.makeText(this, "先粘贴 auth key", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            if (TsnetNode.isMaskedText(this, t)) {
+                Toast.makeText(this, "已是掩码，未改动", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            TsnetNode.setAuthKey(this, t);
+            refreshTsnetCard();
+            Toast.makeText(this, "已保存到本机私有目录（不显示明文）", Toast.LENGTH_SHORT).show();
         });
-        c.addView(bApply);
-        Button bRestart = btn("重启 clash");
-        bRestart.setOnClickListener(v -> {
-            clashAppInfo.setText("正在重启 clash（会短暂断代理，几秒恢复，重启失败也不等于断网）…");
-            new Thread(() -> {
-                final ClashAppBypass.Result r = ClashAppBypass.restartClash();
-                clashAppInfo.post(() -> clashAppInfo.setText(r.message));
-            }, "clash-restart").start();
+        c.addView(bSave);
+        Button bClearKey = btn("清除已保存的密钥");
+        bClearKey.setOnClickListener(v -> {
+            // 只清 prefs 里的密钥，不删 noBackupFilesDir 登录状态：
+            // 已登录过的节点不受影响；无登录状态时清完再点网页登录会正常出链接。
+            TsnetNode.stop(this);
+            TsnetNode.clearAuthKey(this);
+            if (tsnetKeyInput != null) tsnetKeyInput.setText("");
+            refreshTsnetCard();
+            Toast.makeText(this, "已清除，点网页登录重新授权或重填正确密钥", Toast.LENGTH_SHORT).show();
         });
-        c.addView(bRestart);
-        Button bClear = btn("全部取消");
-        bClear.setOnClickListener(v -> {
-            clashAppSelection.clear();
-            refreshClashAppRows();
+        c.addView(bClearKey);
+        // 网页登录区：链接只在卡面展示，默认隐藏；等授权/过期时才出现。
+        tsnetLoginBox = new LinearLayout(this);
+        tsnetLoginBox.setOrientation(LinearLayout.VERTICAL);
+        tsnetLoginBox.setVisibility(android.view.View.GONE);
+        tsnetLoginUrl = new TextView(this);
+        tsnetLoginUrl.setTextSize(13);
+        tsnetLoginUrl.setTextColor(TEXT_DARK);
+        tsnetLoginUrl.setTextIsSelectable(true);
+        tsnetLoginBox.addView(tsnetLoginUrl);
+        bOpenLogin = btn("在浏览器打开登录链接");
+        bOpenLogin.setOnClickListener(v -> {
+            String u = TsnetNode.getLoginUrl();
+            if (u == null || u.isEmpty()) {
+                Toast.makeText(this, "链接还没拉到，稍等再点", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            try {
+                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(u)));
+            } catch (Exception e) {
+                try {
+                    android.content.ClipboardManager cm = (android.content.ClipboardManager)
+                            getSystemService(CLIPBOARD_SERVICE);
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("tsnet-login-url", u));
+                } catch (Exception ignored) {
+                }
+                Toast.makeText(this, "打不开浏览器，已复制链接，去浏览器粘贴打开", Toast.LENGTH_SHORT).show();
+            }
         });
-        c.addView(bClear);
+        tsnetLoginBox.addView(bOpenLogin);
+        bCopyLogin = btn("复制登录链接");
+        bCopyLogin.setOnClickListener(v -> {
+            String u = TsnetNode.getLoginUrl();
+            if (u == null || u.isEmpty()) {
+                Toast.makeText(this, "链接还没拉到，稍等再点", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            android.content.ClipboardManager cm = (android.content.ClipboardManager)
+                    getSystemService(CLIPBOARD_SERVICE);
+            cm.setPrimaryClip(android.content.ClipData.newPlainText("tsnet-login-url", u));
+            Toast.makeText(this, "已复制登录链接（只在 App 内使用，别转发）", Toast.LENGTH_SHORT).show();
+        });
+        tsnetLoginBox.addView(bCopyLogin);
+        bRefreshLogin = btn("重新获取登录链接");
+        bRefreshLogin.setOnClickListener(v -> {
+            TsnetNode.refreshLoginUrl(this, AgentService.getPort(this));
+            tsnetInfo.postDelayed(this::refreshTsnetCard, 3000);
+            tsnetInfo.postDelayed(this::refreshTsnetCard, 10000);
+        });
+        tsnetLoginBox.addView(bRefreshLogin);
+        c.addView(tsnetLoginBox);
+        Button bWebLogin = btn("网页登录（浏览器授权，不用 auth key）");
+        bWebLogin.setOnClickListener(v -> {
+            // v3.85 修：只有健康运行态（运行中且已有 tailnet IP）才提示已在运行；
+            // 运行中但无 IP（错密钥重试中、等授权中、出错态）时 startLogin 内部
+            // 先停掉当前进程再进网页登录模式；有历史登录状态也不再绕密钥路径，
+            // Go 无 key 模式靠 state 目录恢复节点、不出链接。
+            if (TsnetNode.isRunning() && !TsnetNode.getTailIp().isEmpty()) {
+                Toast.makeText(this, "节点已在运行", Toast.LENGTH_SHORT).show();
+                refreshTsnetCard();
+                return;
+            }
+            TsnetNode.startLogin(this, AgentService.getPort(this));
+            Toast.makeText(this, "正在切换到网页登录模式，链接一到自动跳浏览器", Toast.LENGTH_SHORT).show();
+            tsnetInfo.postDelayed(this::refreshTsnetCard, 3000);
+            tsnetInfo.postDelayed(this::refreshTsnetCard, 10000);
+        });
+        c.addView(bWebLogin);
+        Button bStart = btn("启动内置节点");
+        bStart.setOnClickListener(v -> {
+            TsnetNode.start(this, AgentService.getPort(this));
+            tsnetInfo.postDelayed(this::refreshTsnetCard, 3000);
+            tsnetInfo.postDelayed(this::refreshTsnetCard, 10000);
+        });
+        c.addView(bStart);
+        Button bStop = btn("停止内置节点");
+        bStop.setOnClickListener(v -> {
+            TsnetNode.stop(this);
+            tsnetInfo.postDelayed(this::refreshTsnetCard, 500);
+        });
+        c.addView(bStop);
+        Button bCopy = btn("复制 tailnet IP");
+        bCopy.setOnClickListener(v -> {
+            String ip = TsnetNode.getTailIp();
+            if (ip == null || ip.isEmpty()) {
+                Toast.makeText(this, "节点未运行或 IP 获取中", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            android.content.ClipboardManager cm = (android.content.ClipboardManager)
+                    getSystemService(CLIPBOARD_SERVICE);
+            cm.setPrimaryClip(android.content.ClipData.newPlainText("tsnet-ip", ip));
+            Toast.makeText(this, "已复制 tailnet IP", Toast.LENGTH_SHORT).show();
+        });
+        c.addView(bCopy);
+        Button bRefresh = btn("刷新状态");
+        bRefresh.setOnClickListener(v -> refreshTsnetCard());
+        c.addView(bRefresh);
+        tsnetInfo.postDelayed(this::refreshTsnetCard, 500);
         return c;
     }
 
@@ -3953,6 +5151,257 @@ public class MainActivity extends Activity {
     }
 
     // ---------- 终端页（内置 shell + 内置 Termux 环境 + 插件生态） ----------
+
+    // ---------- v3.83 第二批：统一设置页 ----------
+    private java.util.Map<String, TextView> settingsInfoViews = new java.util.HashMap<>();
+    private TextView settingsAuditView;
+    private boolean settingsEventGuard = false;
+
+    private LinearLayout buildSettingsCard() {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(16), dp(8), dp(16), dp(100));
+        TextView title = new TextView(this);
+        title.setText("⚙️ 统一设置");
+        title.setTextSize(18);
+        title.setTextColor(DyColor.onSurface(this));
+        box.addView(title);
+        box.addView(grayText("新设置先注册再上架；密钥类不在此改、不在此记，只跳原卡。旧的各卡入口保留做跳转。"));
+        // v3.95 横屏方向设置（独立行，不走注册表 CHOICE 类型，v2 再并入注册表）
+        {
+            TextView ot = new TextView(this);
+            ot.setText("屏幕方向");
+            ot.setTextSize(14);
+            ot.setTextColor(DyColor.onSurface(this));
+            ot.setPadding(0, dp(14), 0, dp(4));
+            box.addView(ot);
+            box.addView(grayText("跟随系统：横屏时内容分栏、底部 tab 不动；仅竖屏/仅横屏强制对应布局，改完立即生效。"));
+            LinearLayout orow = new LinearLayout(this);
+            orow.setOrientation(LinearLayout.HORIZONTAL);
+            String cur = orientationSetting();
+            String[][] opts = {{"system", "跟随系统"}, {"portrait", "仅竖屏"},
+                    {"landscape", "仅横屏"}};
+            for (String[] o : opts) {
+                Button b = smallBtn(o[1] + (o[0].equals(cur) ? " ✓" : ""));
+                final String v = o[0];
+                b.setOnClickListener(vv -> {
+                    getSharedPreferences("ui", MODE_PRIVATE).edit()
+                            .putString("orientation", v).apply();
+                    log("⚙️ 屏幕方向 → " + o[1]);
+                    try { applyOrientationLayout(); } catch (Exception ignored) {}
+                    // 按钮上的 ✓ 在下次进设置页时刷新，不当场重建整卡
+                });
+                orow.addView(b);
+            }
+            box.addView(orow);
+        }
+        for (String group : SettingRegistry.groups()) {
+            TextView h = new TextView(this);
+            h.setText("— " + group + " —");
+            h.setTextSize(14);
+            h.setTextColor(DyColor.onSurface(this));
+            h.setPadding(0, dp(14), 0, dp(4));
+            box.addView(h);
+            for (SettingRegistry.Field fld : SettingRegistry.fieldsOf(group)) {
+                box.addView(buildSettingRow(fld));
+            }
+            if (SettingRegistry.G_NET.equals(group)) {
+                Button restore = smallBtn("停止隧道与节点（危险）");
+                restore.setOnClickListener(v -> SettingRegistry.confirmDangerous(this,
+                        "确认停止隧道与节点？",
+                        "将停掉 Cloudflare 隧道与 tsnet 节点。只停本次运行，不改开机自启；各服务可在原卡重新打开。",
+                        () -> {
+                            String r = SettingRegistry.restoreDirect(this);
+                            log("⚙️ " + r);
+                            refreshSettingsInfo();
+                        }));
+                box.addView(restore);
+            }
+            if (SettingRegistry.G_STORE.equals(group)) {
+                Button auditBtn = smallBtn("刷新审计日志");
+                auditBtn.setOnClickListener(v -> refreshSettingsInfo());
+                box.addView(auditBtn);
+                Button clearBtn = smallBtn("清除审计日志（危险）");
+                clearBtn.setOnClickListener(v -> SettingRegistry.confirmDangerous(this,
+                        "确认清除审计日志？",
+                        "审计记录将全部删除且不可恢复（清除本身不记新行，否则清除无意义）。",
+                        () -> {
+                            SettingRegistry.clearAudit(this);
+                            refreshSettingsInfo();
+                            log("⚙️ 审计日志已清除");
+                        }));
+                box.addView(clearBtn);
+                settingsAuditView = new TextView(this);
+                settingsAuditView.setTextSize(12);
+                settingsAuditView.setTextColor(DyColor.onSurfaceVariant(this));
+                box.addView(settingsAuditView);
+            }
+        }
+        return box;
+    }
+
+    private LinearLayout buildSettingRow(final SettingRegistry.Field fld) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setPadding(0, dp(6), 0, dp(6));
+        TextView label = new TextView(this);
+        label.setText(fld.title);
+        label.setTextSize(14);
+        label.setTextColor(DyColor.onSurface(this));
+        row.addView(label);
+        if (fld.desc != null && !fld.desc.isEmpty()) {
+            TextView ds = new TextView(this);
+            ds.setText(fld.desc);
+            ds.setTextSize(12);
+            ds.setTextColor(DyColor.onSurfaceVariant(this));
+            row.addView(ds);
+        }
+        switch (fld.kind) {
+            case BOOL: {
+                final android.widget.Switch sw = new android.widget.Switch(this);
+                sw.setChecked(SettingRegistry.getBool(this, fld.path,
+                        "true".equals(fld.def)));
+                sw.setOnCheckedChangeListener((bv, checked) -> {
+                    if (settingsEventGuard) return;
+                    if (fld.dangerous) {
+                        // 危险 BOOL：取消必须把开关视觉复位（confirmDangerous 无取消回调，故内联对话框）
+                        new android.app.AlertDialog.Builder(this)
+                                .setTitle("确认修改“" + fld.title + "”？")
+                                .setMessage("这是危险项，改动可能影响远控与网络。确认后才写入。")
+                                .setNegativeButton("取消", (d, w) -> {
+                                    settingsEventGuard = true;
+                                    sw.setChecked(!checked);
+                                    settingsEventGuard = false;
+                                })
+                                .setPositiveButton("确认执行", (d, w) -> {
+                                    SettingRegistry.setBool(this, fld.path, checked);
+                                    SettingRegistry.logChange(this, fld.path,
+                                            checked ? "关" : "开", checked ? "开" : "关");
+                                    log("⚙️ " + fld.title + " → " + (checked ? "开" : "关"));
+                                })
+                                .show();
+                    } else {
+                        boolean old = !checked;
+                        SettingRegistry.setBool(this, fld.path, checked);
+                        SettingRegistry.logChange(this, fld.path,
+                                old ? "开" : "关", checked ? "开" : "关");
+                        log("⚙️ " + fld.title + " → " + (checked ? "开" : "关"));
+                        // v4.07 夜间模式切换后重建界面（主题与 DyColor 都要重算）
+                        if ("ui.night_mode".equals(fld.path)) {
+                            recreate();
+                        }
+                    }
+                });
+                row.addView(sw);
+                break;
+            }
+            case INT: {
+                LinearLayout lr = new LinearLayout(this);
+                lr.setOrientation(LinearLayout.HORIZONTAL);
+                final android.widget.EditText et = new android.widget.EditText(this);
+                et.setInputType(android.text.InputType.TYPE_CLASS_NUMBER
+                        | android.text.InputType.TYPE_NUMBER_FLAG_SIGNED);
+                et.setText(String.valueOf(SettingRegistry.getInt(this, fld.path,
+                        parseIntDef(fld.def, 0))));
+                et.setTextSize(14);
+                et.setLayoutParams(new LinearLayout.LayoutParams(0, dp(44), 1f));
+                Button save = smallBtn("保存");
+                save.setOnClickListener(v -> {
+                    try {
+                        int nv = Integer.parseInt(et.getText().toString().trim());
+                        if (nv < fld.min || nv > fld.max) {
+                            log("⚙️ “" + fld.title + "”超出范围（"
+                                    + fld.min + "–" + fld.max + "），未保存");
+                            return;
+                        }
+                        int old = SettingRegistry.getInt(this, fld.path,
+                                parseIntDef(fld.def, 0));
+                        SettingRegistry.setInt(this, fld.path, nv);
+                        SettingRegistry.logChange(this, fld.path,
+                                String.valueOf(old), String.valueOf(nv));
+                        log("⚙️ " + fld.title + " → " + nv);
+                        // v4.07 章鱼待机时间保存后立即按新时间重算计时
+                        if ("ui.standby_seconds".equals(fld.path)) {
+                            resetStandbyTimer();
+                        }
+                    } catch (Exception e) {
+                        log("⚙️ “" + fld.title + "”不是有效数字，未保存");
+                    }
+                });
+                lr.addView(et);
+                lr.addView(save);
+                row.addView(lr);
+                break;
+            }
+            case INFO: {
+                TextView tv = new TextView(this);
+                tv.setTextSize(13);
+                tv.setTextColor(DyColor.onSurfaceVariant(this));
+                settingsInfoViews.put(fld.path, tv);
+                row.addView(tv);
+                break;
+            }
+            case JUMP: {
+                Button go = smallBtn("打开 →");
+                go.setOnClickListener(v -> {
+                    Runnable jump = () -> {
+                        if ("agenttab".equals(fld.jumpKey)) showPage(2);
+                        else showRemoteSection(fld.jumpKey);
+                    };
+                    if (fld.dangerous) {
+                        SettingRegistry.confirmDangerous(this,
+                                "跳转到“" + fld.title + "”？",
+                                "该项是危险项（改 token / 改路由），在原卡修改，密钥只显掩码。",
+                                jump);
+                    } else {
+                        jump.run();
+                    }
+                });
+                row.addView(go);
+                break;
+            }
+            default:
+                break;
+        }
+        return row;
+    }
+
+    private int parseIntDef(String def, int fallback) {
+        try {
+            return Integer.parseInt(def);
+        } catch (Exception e) {
+            return fallback;
+        }
+    }
+
+    private void refreshSettingsInfo() {
+        TextView v;
+        v = settingsInfoViews.get("conn.remote_port");
+        if (v != null) v.setText("当前端口：" + AgentService.getPort(this));
+        v = settingsInfoViews.get("model.main_model");
+        if (v != null) {
+            String m = "";
+            try {
+                m = llmStore == null ? "" : llmStore.getModel();
+            } catch (Exception ignored) {
+            }
+            v.setText(m == null || m.isEmpty() ? "（未配置）" : m);
+        }
+        v = settingsInfoViews.get("about.version");
+        if (v != null) v.setText("GSIC " + AppInfo.VERSION);
+        v = settingsInfoViews.get("about.terms");
+        if (v != null) v.setText(TermsGate.isAccepted(this) ? "已接受" : "未接受");
+        if (settingsAuditView != null) {
+            java.util.List<String> tail = SettingRegistry.readAuditTail(this, 10);
+            if (tail.isEmpty()) {
+                settingsAuditView.setText("暂无审计记录");
+            } else {
+                StringBuilder sb = new StringBuilder();
+                for (String ln : tail) sb.append(ln).append("\n");
+                settingsAuditView.setText(sb.toString());
+            }
+        }
+    }
 
     private LinearLayout buildTermPage() {
         LinearLayout inner = new LinearLayout(this);
@@ -5412,18 +6861,90 @@ public class MainActivity extends Activity {
     // v2.83：加动画取消+状态防抖，防输入框和 tab 打架
     private boolean tabBarHidden = false;
 
+    /** v4.11：输入框底部边距动画的目标与进行中的动画。
+     * v4.10 的教训：边距一帧从 84dp 切到 8dp，输入框在键盘还在
+     * 往上走、tab 还在往下滑的时候瞬间瞬移 76dp，眼睛看到的就是
+     * 闪烁 + 不丝滑。改成 250ms 的平滑动画后，输入框跟着键盘/tab
+     * 一起滑到位。inputMarginTarget 是“正在往哪个值滑”，动画进行中
+     * 布局边距是中间值、还没到目标——全局布局监听每帧都来时，必须
+     * 认目标不认当前值，否则每帧都重启动画、抖得更厉害。 */
+    private android.animation.ValueAnimator inputMarginAnimator = null;
+    private int inputMarginTarget = -1;
+
+    /** v4.10：输入框底部边距跟键盘走——键盘弹起（tab 已隐藏）或横屏
+     * （tab 在右侧）时只留 8dp，输入框贴紧键盘/底部；只有竖屏且键盘
+     * 收起、底部 tab 占位时才留 84dp 避让。
+     * v4.11：改瞬切为 250ms 平滑动画（时长对齐键盘升起与 tab 滑出），
+     * 目标不变时直接返回，不重启进行中的动画。 */
+    private void updateInputBarBottomMargin(boolean kbVisible) {
+        if (agentInputBar == null) {
+            return;
+        }
+        try {
+            android.view.ViewGroup.LayoutParams lp = agentInputBar.getLayoutParams();
+            if (!(lp instanceof LinearLayout.LayoutParams)) {
+                return;
+            }
+            LinearLayout.LayoutParams llp = (LinearLayout.LayoutParams) lp;
+            boolean needTabClearance = !kbVisible && !landscapeLayout;
+            int want = needTabClearance ? dp(84) : dp(8);
+            if (want == inputMarginTarget) {
+                return;
+            }
+            inputMarginTarget = want;
+            if (inputMarginAnimator != null) {
+                try { inputMarginAnimator.cancel(); } catch (Exception ignored) {}
+                inputMarginAnimator = null;
+            }
+            int from = llp.bottomMargin;
+            if (from == want) {
+                return;
+            }
+            final LinearLayout.LayoutParams animLp = llp;
+            android.animation.ValueAnimator anim =
+                    android.animation.ValueAnimator.ofInt(from, want);
+            anim.setDuration(250);
+            anim.setInterpolator(new android.view.animation.DecelerateInterpolator());
+            anim.addUpdateListener(a -> {
+                try {
+                    animLp.bottomMargin = (Integer) a.getAnimatedValue();
+                    agentInputBar.setLayoutParams(animLp);
+                } catch (Exception ignored) {
+                }
+            });
+            anim.addListener(new android.animation.AnimatorListenerAdapter() {
+                @Override
+                public void onAnimationEnd(android.animation.Animator animation) {
+                    if (inputMarginAnimator == animation) {
+                        inputMarginAnimator = null;
+                    }
+                }
+                @Override
+                public void onAnimationCancel(android.animation.Animator animation) {
+                    if (inputMarginAnimator == animation) {
+                        inputMarginAnimator = null;
+                    }
+                }
+            });
+            inputMarginAnimator = anim;
+            anim.start();
+        } catch (Exception ignored) {
+        }
+    }
+
     private void hideTabBar() {
         if (tabBarHidden) return;
         tabBarHidden = true;
         if (tabBarView != null && tabBarView.getVisibility() == View.VISIBLE) {
             tabBarView.animate().cancel();
-            tabBarView.animate().translationY(dp(80)).alpha(0f)
+            // v3.96：横屏 tab 在右侧，隐藏时向右滑出；竖屏向下滑出
+            if (landscapeLayout) tabBarView.animate().translationX(dp(80)).alpha(0f)
                     .setDuration(200)
                     .withEndAction(() -> tabBarView.setVisibility(View.GONE));
-            if (contentView != null) {
-                contentView.setPadding(0, 0, 0, 0);
-                contentView.requestLayout();
-            }
+            else tabBarView.animate().translationY(dp(80)).alpha(0f)
+                    .setDuration(200)
+                    .withEndAction(() -> tabBarView.setVisibility(View.GONE));
+            applyContentPadding();
         }
     }
 
@@ -5433,12 +6954,9 @@ public class MainActivity extends Activity {
         if (tabBarView != null && tabBarView.getVisibility() != View.VISIBLE) {
             tabBarView.animate().cancel();
             tabBarView.setVisibility(View.VISIBLE);
-            tabBarView.animate().translationY(0).alpha(1f).setDuration(200);
-            // v2.92：内容可滑到 tab 下方，不留白
-            if (contentView != null) {
-                contentView.setPadding(0, 0, 0, 0);
-                contentView.requestLayout();
-            }
+            // v3.96：恢复时两个方向的位移都清零，防横竖切换后残留
+            tabBarView.animate().translationX(0).translationY(0).alpha(1f).setDuration(200);
+            applyContentPadding();
         }
     }
 
@@ -5508,6 +7026,18 @@ public class MainActivity extends Activity {
             agentScrollView.post(() -> agentScrollView.fullScroll(
                     android.view.View.FOCUS_DOWN));
         }
+        // v4.04：切到主页时按方向切换主页布局——横屏显示
+        // 虚拟屏+工具代码、藏菜单详情，离开主页停表省资源
+        try {
+            if (idx == 0 && landscapeLayout && homeLandOuter != null) {
+                homeMenuScroll.setVisibility(View.GONE);
+                homeDetailWrap.setVisibility(View.GONE);
+                homeLandOuter.setVisibility(View.VISIBLE);
+                startHomeLandTick();
+            } else if (idx != 0) {
+                stopHomeLandTick();
+            }
+        } catch (Exception ignored) {}
     }
 
     // v3.58：tab 图标改单色细线条矢量绘制（TabIconView），选中态胶囊底由图标视图自绘
@@ -5665,7 +7195,23 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        // v4.07 夜间模式（默认夜间，可手动改）：在 super 之前定主题，
+        // 这样程序化建的视图默认文字色、对话框等都跟夜间/日间走。
+        // 夜间用 Material 深色主题，日间用 Material Light 无 ActionBar。
+        try {
+            boolean night = SettingRegistry.getBool(this, "ui.night_mode", true);
+            setTheme(night ? android.R.style.Theme_Material_NoActionBar
+                    : android.R.style.Theme_Material_Light_NoActionBar);
+            TEXT_DARK = night ? 0xFFE6E1E5 : 0xFF333333;
+            TEXT_GRAY = night ? 0xFFAAAAAA : 0xFF777777;
+        } catch (Exception ignored) {}
         super.onCreate(savedInstanceState);
+        // v3.97：去掉系统白条 ActionBar（应用主题自带，上面那条白底 GSIC），
+        // 只留代码里画的蓝色 GSIC 顶栏；主题已改 NoActionBar，这里再兜底隐藏一次。
+        try {
+            android.app.ActionBar ab = getActionBar();
+            if (ab != null) ab.hide();
+        } catch (Exception ignored) {}
         if (!TermsGate.isAccepted(this)) {
             new android.app.AlertDialog.Builder(this)
                     .setTitle("GSIC使用协议")
@@ -5699,7 +7245,9 @@ public class MainActivity extends Activity {
 
         // v2.61：根布局改 FrameLayout，底部 tab 改悬浮胶囊样式
         android.widget.FrameLayout root = new android.widget.FrameLayout(this);
-        root.setBackgroundColor(0xFFF7F7F7);
+        rootLayout = root;
+        // v4.07 根背景跟 DyColor 走，夜间不再是浅灰底
+        root.setBackgroundColor(DyColor.surface(this));
 
         LinearLayout content = new LinearLayout(this);
         contentView = content;
@@ -5707,17 +7255,40 @@ public class MainActivity extends Activity {
         // v2.92：tab 悬浮，内容可滑到 tab 下方（tab 半透明）
         content.setPadding(0, 0, 0, 0);
 
+        // v3.98：顶部蓝条也做成胶囊（与底部 tab 同款圆角胶囊样式，
+        // 只改形状不改颜色：仍是 ACCENT 蓝底白字，不再是满宽矩形条）
         LinearLayout appbar = new LinearLayout(this);
-        appbar.setBackgroundColor(ACCENT);
+        android.graphics.drawable.GradientDrawable appbarBg =
+                new android.graphics.drawable.GradientDrawable();
+        appbarBg.setShape(android.graphics.drawable.GradientDrawable.RECTANGLE);
+        appbarBg.setCornerRadius(dp(28));
+        appbarBg.setColor(ACCENT);
+        appbar.setBackground(appbarBg);
+        appbar.setElevation(dp(8));
         TextView abTitle = new TextView(this);
         abTitle.setText("GSIC");
         abTitle.setTextColor(Color.WHITE);
         abTitle.setTextSize(20);
         abTitle.setPadding(dp(16), dp(12), dp(16), dp(12));
         appbar.addView(abTitle);
-        content.addView(appbar, new LinearLayout.LayoutParams(
+        // v4.00 顶部胶囊任务进度：单行跑马灯，超长文字横向滚动，
+        // 只显示纯文字思考，不显示代码；无任务时隐藏，只留 GSIC
+        appbarProgress = new TextView(this);
+        appbarProgress.setTextColor(Color.WHITE);
+        appbarProgress.setTextSize(13);
+        appbarProgress.setSingleLine(true);
+        appbarProgress.setEllipsize(android.text.TextUtils.TruncateAt.MARQUEE);
+        appbarProgress.setMarqueeRepeatLimit(-1);
+        appbarProgress.setSelected(true);
+        appbarProgress.setPadding(dp(8), dp(12), dp(16), dp(12));
+        appbarProgress.setVisibility(android.view.View.GONE);
+        appbar.addView(appbarProgress, new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        LinearLayout.LayoutParams appbarLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT));
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        appbarLp.setMargins(dp(16), dp(12), dp(16), dp(8));
+        content.addView(appbar, appbarLp);
 
         chatStore = new ChatStore(this);
         userProfile = new UserProfile(this);
@@ -5754,7 +7325,8 @@ public class MainActivity extends Activity {
                 new android.graphics.drawable.GradientDrawable();
         capsuleBg.setShape(android.graphics.drawable.GradientDrawable.RECTANGLE);
         capsuleBg.setCornerRadius(dp(28));
-        capsuleBg.setColor(0xD9FFFFFF); // 85% 白，半透明
+        // v4.07 夜间模式：胶囊底跟夜间走（深色半透明），日间仍是 85% 白
+        capsuleBg.setColor(DyColor.isDark(this) ? 0xD92D2C31 : 0xD9FFFFFF);
         tabBar.setBackground(capsuleBg);
         tabBar.setElevation(dp(8));
         tabHome = makeTab(TabIconView.HOME, 0);
@@ -5793,6 +7365,8 @@ public class MainActivity extends Activity {
         int lastTab = getSharedPreferences("ui", MODE_PRIVATE).getInt("tab", 0);
         if (lastTab < 0 || lastTab > 4) lastTab = 0;
         showPage(lastTab);
+        // v3.95 横屏：首次进入即按当前方向重排（横屏进分栏，竖屏不变）
+        try { applyOrientationLayout(); } catch (Exception ignored) {}
         refreshAll();
 
         // v3.05：TG 自启已移到 AgentService.onCreate，这里只刷新状态
@@ -5819,7 +7393,10 @@ public class MainActivity extends Activity {
                     int screenH = decor.getRootView().getHeight();
                     int kbH = screenH - r.bottom;
                     boolean kbVisible = kbH > screenH * 0.15;
-                    // v2.83：只认键盘显隐（删掉焦点双保险，防打架）
+                    // v4.12：键盘升起是藏 tab 的兜底（非智能体页的输入框、
+                    // 或焦点事件没触发时仍靠它藏；智能体输入框主路已是
+                    // 焦点驱动，先于键盘藏 tab）。显示仍只走键盘收起后
+                    // 的防抖，失焦本身不显示——焦点只进、键盘只出，不打架。
                     // v3.01：显示加防抖，防莫名出现
                     if (kbVisible) {
                         // 键盘弹起：取消待显示，立即隐藏
@@ -5830,6 +7407,10 @@ public class MainActivity extends Activity {
                     } else {
                         showTabBarDebounced();
                     }
+                    // v4.10：输入框底部边距跟键盘走（键盘弹起 tab 已藏，
+                    // 再留 84dp 就是漂在键盘上方；键盘收起立刻恢复避让，
+                    // tab 随后从下方滑入正好落到输入框下面）。
+                    updateInputBarBottomMargin(kbVisible);
                     if (kbVisible
                             && pageTerm != null
                             && pageTerm.getVisibility() == View.VISIBLE
@@ -6026,7 +7607,33 @@ public class MainActivity extends Activity {
     @Override
     protected void onPause() {
         super.onPause();
+        // v3.88：离开前台即注销 tsnet 通知，绝不后台拉起浏览器。
+        activityResumed = false;
+        TsnetNode.removeListener(tsnetListener);
         inAppFlowHandler.removeCallbacks(inAppFlowTick);
+        // v4.04：离开前台停横屏主页对表
+        try { stopHomeLandTick(); } catch (Exception ignored) {}
+        // v4.01：离开前台取消待机计时、退出待机黑屏（不留黑屏在后台）
+        try {
+            standbyHandler.removeCallbacks(standbyEnter);
+            if (standbyOn) {
+                if (standbyPet != null) standbyPet.stopAnim();
+                if (standbyView != null && rootLayout != null) {
+                    rootLayout.removeView(standbyView);
+                }
+                standbyView = null;
+                standbyPet = null;
+                standbyOn = false;
+                // v4.03：离开前台也要按原样恢复 tab
+                if (standbyTabWasVisible && tabBarView != null) {
+                    tabBarView.setTranslationX(0);
+                    tabBarView.setTranslationY(0);
+                    tabBarView.setAlpha(1f);
+                    tabBarView.setVisibility(View.VISIBLE);
+                }
+                standbyTabWasVisible = false;
+            }
+        } catch (Exception ignored) {}
         FloatWindow.setInApp(false);
         // 离开软件且任务在跑：补弹悬浮窗显示进度
         try {
@@ -6040,9 +7647,35 @@ public class MainActivity extends Activity {
 
     protected void onResume() {
         super.onResume();
+        // v3.98：回前台时重申横屏全屏（切后台、拉通知栏回来后系统
+        // 可能把状态栏恢复显示，这里按当前方向重新隐藏/显示一次）
+        try { applyFullscreen(); } catch (Exception ignored) {}
+        // v3.88：tsnet 通知只在前台收，离开即注销，杜绝 Activity 泄漏。
+        activityResumed = true;
+        TsnetNode.addListener(tsnetListener);
+        // v3.92：链接在后台到达时自动跳转永远等不到通知（v3.88 只在通知
+        // 到达时跳，回来后只刷卡面不跳），导致用户回来还以为跳不出来；
+        // 回来后若链接已在、卡可见，补跳一次，guard 保证同一链接只跳一次。
+        if (tsnetInfo != null) {
+            tsnetInfo.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    maybeAutoJumpLogin();
+                }
+            }, 500);
+        }
         // v3.52：内嵌彩条对表开始（首跳立即执行，回软件即见当前任务状态）
         inAppFlowHandler.removeCallbacks(inAppFlowTick);
         inAppFlowHandler.post(inAppFlowTick);
+        // v4.01：回前台重算横屏待机计时
+        try { resetStandbyTimer(); } catch (Exception ignored) {}
+        // v4.04：回前台若在横屏主页，恢复虚拟屏+工具对表
+        try {
+            if (landscapeLayout && homeLandOuter != null
+                    && homeLandOuter.getVisibility() == View.VISIBLE) {
+                startHomeLandTick();
+            }
+        } catch (Exception ignored) {}
         new Thread(() -> SedimentReport.checkSchedule(this)).start();
         try {
             if (getIntent() != null && getIntent().getBooleanExtra("open_sediment", false)) {

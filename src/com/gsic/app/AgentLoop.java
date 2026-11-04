@@ -149,6 +149,16 @@ return "[]";
 
 private void log(String s) {
 if (listener!= null) listener.onLog(s);
+// v4.00 顶部胶囊任务进度：思考行全量写入共享进度（纯文字清洗在
+// FloatWindow.setProgressText 里做，不显示代码；🖐 动作行不覆盖，
+// 执行期间顶部仍显示最近一次思考，即“准备干什么、怎么做、下一步”）
+try {
+if (s!= null && s.startsWith("\uD83D\uDCAD ")) {
+FloatWindow.setProgressText(s.substring(3));
+} else if (s!= null && s.startsWith("\uD83E\uDD14 ")) {
+FloatWindow.setProgressText(s);
+}
+} catch (Exception ignored) {}
 }
 
 private boolean streamOutput() {
@@ -272,19 +282,23 @@ try {
             taskBook != null ? taskBook.confidence : -1.0,
             planSteps);
 } catch (Exception ignored) {}
-// v3.50 第 3 步：低置信拦截——不硬跑，返回澄清态（三端调用方判 needsClarify() 渲染澄清）
+// v4.16 少问（用户 11-03 亲诉“下任务老问我”）：低置信不再
+// 开跑前拦截——先按最佳理解跑，卡住了执行中再问；敏感动作
+// 仍走风险确认通道兜底，不是无条件硬跑。旧的开跑前澄清态
+// （needsClarify）保留接口但本路径不再触发，三端澄清循环
+// 因此不再因一句话说得简短就先弹框问用户。
 if (taskBook != null && taskBook.needsClarify(confThreshold)) {
-clarifyState = true;
 log("❓ 任务书置信度低（" + taskBook.confidence + " < " + confThreshold
-+ "），不硬跑，等待澄清");
++ "），但先按最佳理解跑（假设：对象=" + taskBook.target
++ "｜动作=" + taskBook.action + "｜疑点=" + taskBook.doubt
++ "），卡住了执行中再问");
 try {
-org.json.JSONObject td = taskData(goal, "低置信拦截");
+org.json.JSONObject td = taskData(goal, "低置信先跑");
 td.put("confidence", taskBook.confidence);
 td.put("threshold", confThreshold);
-Telemetry.event(ctx, channel, "task_clarify", td);
+Telemetry.event(ctx, channel, "task_lowconf_run", td);
 } catch (Exception ignored) {
 }
-return false; // finally 照常清理；经验库不记（任务未实际执行）
 }
 try {
 String exp = SharedMemory.relevantExperience(ctx, goal);
@@ -359,6 +373,38 @@ if (supShot != null) {
 try { supShot.recycle(); } catch (Exception ignored) {}
 supShot = null;
 }
+// v4.14 补（用户 11-03 亲定）：跳出任务结束回 GSIC——
+// 虚拟屏不支持的软件跳出到实体屏跑完后，不停在那个软件
+// 上，要回 GSIC：横屏时是 GSIC 横屏模式（主页横屏布局），
+// 竖屏时是 GSIC 主页。App 通道由 MainActivity 任务收尾
+// 切主页（见 MainActivity），这里只处理非 App 通道：
+// 先把下次打开的标签页记为主页，再把 GSIC 拉到前台。
+// 注意：这不是回设备桌面（2026-10-22 已废止的铁律仍在），
+// 是回 GSIC 自己的主页；没跳出的任务不受影响，仍停在
+// 结束时界面。
+try {
+boolean jumped = ctx.getSharedPreferences("agent",
+        Context.MODE_PRIVATE).getBoolean("task_jumped_out", false);
+if (jumped) {
+ctx.getSharedPreferences("ui", Context.MODE_PRIVATE)
+        .edit().putInt("tab", 0).apply();
+if (!"app".equals(channel)) {
+ctx.getSharedPreferences("agent", Context.MODE_PRIVATE)
+        .edit().putBoolean("task_jumped_out", false).apply();
+try {
+android.content.Intent it = new android.content.Intent(
+        ctx, MainActivity.class);
+it.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+        | android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
+        | android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP);
+ctx.startActivity(it);
+log("跳出任务结束，已回 GSIC 主页");
+} catch (Exception e) {
+log("跳出任务结束回 GSIC 主页失败（下次打开仍为主页）");
+}
+}
+}
+} catch (Exception ignored) {}
 // 2026-10-22 用户亲定废止自动回桌面：「不必所有任务执行完都要
 // 回到桌面」——任务停在结束时界面，除非目标本身要求回桌面。
 // （旧铁律 2026-10-17 立、v3.18 起限主屏任务，此处正式移除）
@@ -420,16 +466,28 @@ if (riskPolicy!= null) runner.setRiskPolicy(riskPolicy);
 runner.setApprover(approver);
 runner.setRemote(remote);
 runner.setCognitionStore(cogStore);
-// v3.36 通道分工：只有 App 内命令走虚拟屏（自动开屏 + 右上角悬浮预览）；
-// TG/远控在主屏正常执行（PhoneTools 会拒绝其 vd_start）。
+// v3.36 通道分工旧规则已由 v4.08 覆盖：不再只 App 通道走虚拟屏。
+// v4.08 所有软件优先虚拟屏（用户 2026-11-02 亲定“所有软件必须
+// 优先用虚拟屏除非不支持”）：目标式任务不论哪个通道、不论横竖屏，
+// 都优先建虚拟屏并锁定虚拟屏（建屏失败才回实体屏，任务开始后不再跨屏；
+// 特别不支持虚拟屏的软件目前没有现成名单，建屏失败是唯一的回退口径，
+// 用户点名后可再加排除名单；task_vd_default 关了则尊重用户关闭）。
+// 例外仍在：GSIC 自身界面留在实体屏（智能体不能在虚拟屏里点自己），
+// 手动点的软件 GSIC 拦不住、仍在实体屏打开。
 PhoneTools.sessionChannel = channel;
 VirtualDisplayManager.setPreviewEnabled("app".equals(channel));
 runner.setVdMode(false);
-// 主从关系钉死：先默认主显示=实体屏；App 通道成功建屏后改钉虚拟屏。
+// v4.14 补：跳出标记只活本任务，开头先清，免得上个任务的
+// 跳出残留让本任务结束时误回主页。
+try {
+ctx.getSharedPreferences("agent", Context.MODE_PRIVATE)
+        .edit().putBoolean("task_jumped_out", false).apply();
+} catch (Exception ignored) {}
+// 主从关系钉死：先默认主显示=实体屏；成功建屏后改钉虚拟屏。
 // 降级只发生在此刻（任何动作执行之前），任务开始后不再跨屏。
 taskPrimaryVd = false;
 PhoneTools.sessionDisplayLock = "main";
-if ("app".equals(channel)) {
+if (true) {
 try {
 boolean vdOn = ctx.getSharedPreferences("agent", Context.MODE_PRIVATE)
 .getBoolean("task_vd_default", true);
@@ -440,9 +498,19 @@ runner.setVdMode(true);
 vdMode = true;
 taskPrimaryVd = true;
 PhoneTools.sessionDisplayLock = "vd";
+if ("app".equals(channel)) {
 log("🖥 App 通道：主显示锁定虚拟屏（实体屏右上角小窗仅实时预览）");
 } else {
+log("🖥 所有软件优先虚拟屏：主显示锁定虚拟屏");
+}
+} else {
 log("虚拟屏创建失败，本任务改在实体屏执行（主显示锁定实体屏）");
+// v4.14 补：建屏失败也是跳到实体屏跑，结束同样回
+// GSIC 主页（与软件不支持跳出同理，见 finally）。
+try {
+ctx.getSharedPreferences("agent", Context.MODE_PRIVATE)
+        .edit().putBoolean("task_jumped_out", true).apply();
+} catch (Exception ignored) {}
 }
 }
 } catch (Exception ignored) {
@@ -512,6 +580,13 @@ int wdLastCheckTurn = 0;
 long wdLastHash = 0;
 int wdSameScreen = 0;
 boolean wdActed = false;
+// v3.83 第三批：防环检测器（只做检查层，不动主循环结构）；阈值读设置注册表
+LoopDetector loopDetector = new LoopDetector(
+        SettingRegistry.getInt(ctx, "agent.loop_warn", 3),
+        SettingRegistry.getInt(ctx, "agent.loop_fuse", 5));
+SkillCardStore.beginSession();
+SkillCardStore.setAutoDeprioritize(
+        SettingRegistry.getBool(ctx, "agent.skill_autodeprioritize", true));
 while (turn < maxSteps) {
 turn++;
 if (listener!= null && listener.isStopped()) {
@@ -560,7 +635,9 @@ messages.put(pinMsg);
 }
 }
 log("🤔 第 " + turn + " 轮思考中...");
-LlmClient.ToolReply tr = llm.chatTools(messages, toolsForSession());
+// v3.83：任务中途用户点停止时，模型 HTTP 也要真中断（不只等响应超时）
+LlmClient.ToolReply tr = llm.chatTools(messages, toolsForSession(),
+        () -> listener != null && listener.isStopped());
 if (!tr.ok) {
 if (tr.httpToolsRejected) {
 log("⛔ 当前模型端点不支持工具调用（function calling），agent 无法执行。"
@@ -700,6 +777,35 @@ return false;
 String name = call.optString("name");
 String argsJson = call.optString("argsJson", "{}");
 String callId = call.optString("id");
+// v4.17 借鉴 Eta 的循环不变量：截断的工具调用绝不执行——参数
+// 不是合法 JSON（输出被截断的典型症状）时跳过执行，给模型一个
+// 结构化错误让它重发完整调用，而不是拿半截参数去点错地方。
+if (name.isEmpty()) {
+log("⛔ 工具调用缺名字，已跳过未执行");
+try {
+JSONObject tm = new JSONObject();
+tm.put("role", "tool");
+tm.put("tool_call_id", callId);
+tm.put("content", "【系统】工具调用缺少名字，未执行；请重发完整调用。");
+messages.put(tm);
+} catch (Exception ignored) {}
+continue;
+}
+try {
+new JSONObject(argsJson == null ? "{}" : argsJson);
+} catch (Exception e) {
+log("⛔ 工具调用参数不是合法 JSON（可能被截断），已跳过未执行：" + name);
+try {
+JSONObject tm = new JSONObject();
+tm.put("role", "tool");
+tm.put("tool_call_id", callId);
+tm.put("content", "【系统】" + name + " 的调用参数不是合法 JSON"
++ "（可能输出被截断），本次未执行；请重新规划后重发完整调用，"
++ "不要重复执行半截参数。");
+messages.put(tm);
+} catch (Exception ignored) {}
+continue;
+}
 log("🖐 " + name);
 hist.append("🖐 ").append(name).append(" ").append(argsJson).append("\n");
 boolean vdNow = taskPrimaryVd;
@@ -709,12 +815,66 @@ log("⛔ 虚拟屏主显示已失效，任务中止（不回退实体屏，防�
 lastHistory = hist.toString();
 return false;
 }
+// v3.83 第三批：防环检查（observe/sleep 是合法重复，排除在外）
+if (!"observe".equals(name) && !"sleep".equals(name)) {
+    LoopDetector.Verdict lv = loopDetector.record(
+            name, argsJson, String.valueOf(wdLastHash));
+    if (lv == LoopDetector.Verdict.FUSE) {
+        log("⛔ 疑似死循环，已熔断停止（同一动作+参数+界面连续重复 "
+                + loopDetector.getFuseThreshold() + " 次）");
+        if (taskLogger!= null) taskLogger.finish(false, "疑似死循环熔断");
+        lastHistory = hist.toString();
+        return false;
+    }
+    if (lv == LoopDetector.Verdict.WARN) {
+        log("⚠️ 疑似重复动作（连续 " + loopDetector.getWarnThreshold()
+                + " 次相同），本次跳过并强制换策略");
+        try {
+            JSONObject nm = new JSONObject();
+            nm.put("role", "user");
+            nm.put("content", "【系统】你刚才连续重复了同一个动作（" + name
+                    + "，参数与界面均未变），本次已跳过该动作。禁止再重复同一动作，"
+                    + "必须换一种方法或先观察界面确认状态后再动手。");
+            messages.put(nm);
+        } catch (Exception ignored) {
+        }
+        continue;
+    }
+}
 // v3.51 步骤5：工具耗时（tool_result 用）
 long toolT0 = System.currentTimeMillis();
 PhoneTools.Exec ex = PhoneTools.execute(ctx, runner, name, argsJson, vdNow);
 long toolMs = System.currentTimeMillis() - toolT0;
+// v4.04 横屏主页右侧工具与代码：每次工具执行完即记入共享日志
+// （工具名 + 参数代码原样 + 成败与结果摘要，三端共用）
+try { AgentToolLog.add(name, argsJson, ex.ok, ex.text); } catch (Exception ignored) {}
+// v4.05 横屏虚拟屏待机：成功启动的软件记为“最近运行过的软件”，
+// 供横屏主页左待机显示图标与名字（只记智能体成功启动的软件，
+// 用户手动点的软件 GSIC 看不到，不记；持久化到 agent 配置）。
+try {
+if ("launch".equals(name) && ex.ok) {
+String pkg = new org.json.JSONObject(argsJson).optString("package", "");
+if (!pkg.isEmpty()) {
+ctx.getSharedPreferences("agent", Context.MODE_PRIVATE).edit()
+.putString("last_run_pkg", pkg)
+.putLong("last_run_at", System.currentTimeMillis())
+.apply();
+}
+}
+} catch (Exception ignored) {}
 if (!vdNow && !"observe".equals(name)) touchedMain = true;
-vdMode = vdNow;
+// v4.14 补：虚拟屏不支持跳出同步——TaskRunner 的 vd_launch
+// 跳出时会把 runner 的 vdMode 关掉（后续步骤走实体屏），
+// 这里必须把 AgentLoop 自己的主显示也同步过去，否则 observe
+// 还会拍空虚拟屏、模型在实体屏点按却看虚拟屏画面。
+// 同步后 taskPrimaryVd=false，下轮 vdNow=false，observe 切
+// 回主屏；虚拟屏本身仍在，任务结束时 finally 照常销毁。
+if (taskPrimaryVd && !runner.isVdMode()) {
+    taskPrimaryVd = false;
+    PhoneTools.sessionDisplayLock = "main";
+    log("虚拟屏不支持，已跳出到实体屏，后续在实体屏继续");
+}
+vdMode = taskPrimaryVd;
 if (!"observe".equals(name)) {
 actionsDone++;
 lastActionsDone = actionsDone;
@@ -848,7 +1008,17 @@ try {
 JSONObject tm = new JSONObject();
 tm.put("role", "tool");
 tm.put("tool_call_id", callId);
-tm.put("content", ex.text == null? "": ex.text);
+// v4.17 借鉴 Eta 的工具结果预算：长工具结果（界面节点、shell 输出）
+// 全量喂模型既烧 token 又挤上下文——单条超 6000 字时首尾压缩，
+// 中间截断并注明总长度，关键信息一般在首尾，模型不够再单独追问。
+String toolText = ex.text == null? "": ex.text;
+if (toolText.length() > 6000) {
+toolText = toolText.substring(0, 4000)
++ "\n…（工具结果过长，已截断，共 " + ex.text.length()
++ " 字，首尾已保留）…\n"
++ toolText.substring(toolText.length() - 2000);
+}
+tm.put("content", toolText);
 messages.put(tm);
 // observe 的截图以图片消息跟上（只留最新一帧，旧图剥除省 token）
 if (ex.shot!= null) {
@@ -1113,6 +1283,11 @@ p.append("本任务主显示锁定为虚拟屏：全部操作只在虚拟屏进�
 p.append("本任务主显示锁定为实体屏：直接在实体屏操作，不要尝试开虚拟屏（vd_start 会被拒绝）。");
 }
 p.append("先理解用户真正要什么再动手：结合对话上下文和当前界面理解指代与言外之意，按目标推进，不要逐字死磕字面步骤；此路不通时换方法继续朝目标走。");
+// v4.16 少问原则（用户 11-03 亲定）：接到任务先按最佳理解动手，不要先问；
+p.append("少问原则：接到任务先按最佳理解动手，不要先问；做法、步骤、选哪个入口、怎么点都自己定，不许问用户；一个任务最多问用户一次，且只问目标本身不清、且不同理解会导致不同不可逆结果、或只有用户才知道的信息（验证码、密码、个人取舍）；问过一次、用户没回、或答案能在设备/屏幕/搜索/技能卡里找到，就按最佳判断继续，并在结论里说明你的假设，不要把问题留给用户。");
+// v4.17 借鉴 Eta 的 present_to_user（GSIC 自己实现）：虚拟屏任务到
+// 了需要用户看的页面时交回主屏（重起、状态可能丢失，不到必要不用）。
+p.append("交回主屏：虚拟屏任务到达登录、二维码、付款确认、结果页等需要用户在主屏看的页面、且虚拟屏内无法继续时，调 present_to_user 交回主屏（交回是重起，当前页状态可能丢失，不到必要时不用）；交回后在实体屏继续，任务结束回 GSIC 主页。");
 p.append("\n你通过工具看屏和操作（执行通道 root 优先，无 root 才用无障碍）。完成任务后，用一段文字回复用户结果（不再调工具即结束）。");
 // v3.57 本地编程能力：编程优先——改软件先找配置/数据文件，能写脚本别手点
 p.append("改软件/系统层时：先用 read_file 找它的配置与数据文件（/data/data/<包名>/shared_prefs/*.xml、databases、files），读懂再改；能改文件或写脚本（termux 里 python3/bash）解决的，不要进界面手点；改完用 shell/termux 查状态验证，不要只看界面。");

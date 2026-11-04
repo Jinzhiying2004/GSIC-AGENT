@@ -1063,6 +1063,15 @@ public class TaskRunner {
             }
             case "ask_user": {
                 // 学习梯子第 3 级：两轮搜完无果，问用户一句（选项式）
+                // v4.16 少问：每任务最多问一次——已经问过的再调直接驳回，
+                // 让模型按最佳判断继续，不要反复弹框问用户。
+                if (ladder.hasAsked()) {
+                    lastOutput = "本任务已经问过用户一次，不要再问；"
+                            + "按你自己的最佳判断继续，并在最终结论里说明"
+                            + "你的假设和依据，不要把问题留给用户。";
+                    log(lastOutput);
+                    return true;
+                }
                 String question = st.optString("question", "").trim();
                 if (question.isEmpty()) {
                     lastOutput = "ask_user 缺少 question 参数：请说清要问用户什么，"
@@ -1427,7 +1436,79 @@ public class TaskRunner {
                         + " -n " + pkg + "/"
                         + getLaunchActivity(ctx, pkg) + " 2>&1");
                 log("启动到虚拟屏: " + out.trim());
-                return !out.contains("Error");
+                // v4.14 补（用户 11-03 亲定跳出后回 GSIC）：虚拟屏
+                // 启动失败（Error）或重起仍被主屏劫持，说明这个
+                // 软件不支持虚拟屏——不再判任务失败，改跳出到实体
+                // 屏继续跑，并记跳出标记（任务结束回 GSIC 主页用）。
+                // 跳出后本 TaskRunner 后续步骤不再改写为 vd_*，
+                // 否则点按还会打到空虚拟屏上。
+                if (out.contains("Error") || out.contains("currently running")) {
+                    String why = out.contains("Error") ? "虚拟屏启动失败"
+                            : "主屏实例劫持虚拟屏启动";
+                    log(why + "，先清后重起一次");
+                    rootCmdOut("am force-stop " + pkg + " 2>&1");
+                    String out2 = rootCmdOut("am start --display " + did
+                            + " -n " + pkg + "/"
+                            + getLaunchActivity(ctx, pkg) + " 2>&1");
+                    log("虚拟屏重起: " + out2.trim());
+                    if (!out2.contains("Error")
+                            && !out2.contains("currently running")) return true;
+                    log("虚拟屏不支持该软件，跳出到实体屏继续");
+                    vdMode = false;
+                    try {
+                        ctx.getSharedPreferences("agent",
+                                android.content.Context.MODE_PRIVATE)
+                                .edit().putBoolean("task_jumped_out", true).apply();
+                    } catch (Exception ignored) {}
+                    String out3 = rootCmdOut("am start -n " + pkg + "/"
+                            + getLaunchActivity(ctx, pkg) + " 2>&1");
+                    log("实体屏启动: " + out3.trim());
+                    return !out3.contains("Error");
+                }
+                return true;
+            }
+            case "present_to_user": {
+                // v4.17 借鉴 Eta 的 present_to_user（思路借鉴、GSIC 自己实现，
+                // 未搬 Eta 代码）：模型在虚拟屏任务到达需要用户在主屏看的
+                // 页面（登录、二维码、付款确认、结果页）时调用，把任务交回
+                // 实体屏继续。诚实边界：GSIC 没有系统级任务迁移能力，交回
+                // 是 force-stop 后在主屏重起，当前页状态可能丢失——不到必要
+                // 时不用；交回后 vdMode 关掉，后续走实体屏，AgentLoop 的
+                // 跳出同步会把主显示切回实体屏，任务结束仍回 GSIC 主页。
+                if (!vdMode || !VirtualDisplayManager.isActive()) {
+                    lastOutput = "当前任务不在虚拟屏，无需交回主屏，继续在实体屏执行即可。";
+                    log(lastOutput);
+                    return false;
+                }
+                String pkg = st.optString("package", "").trim();
+                if (pkg.isEmpty()) pkg = fgPackage();
+                if (pkg.isEmpty() || "com.gsic.app".equals(pkg)) {
+                    lastOutput = "交回主屏需要 package 参数（当前虚拟屏前台包拿不到时请明传），"
+                            + "未执行交回，仍在虚拟屏。";
+                    log(lastOutput);
+                    return false;
+                }
+                log("交回主屏（重起，当前页状态可能丢失）: " + pkg);
+                rootCmdOut("am force-stop " + pkg + " 2>&1");
+                String out = rootCmdOut("am start -n " + pkg + "/"
+                        + getLaunchActivity(ctx, pkg) + " 2>&1");
+                log("实体屏重起: " + out.trim());
+                if (out.contains("Error")) {
+                    lastOutput = "交回主屏失败（实体屏启动报错），仍在虚拟屏："
+                            + out.trim();
+                    log(lastOutput);
+                    return false;
+                }
+                vdMode = false;
+                try {
+                    ctx.getSharedPreferences("agent",
+                            android.content.Context.MODE_PRIVATE)
+                            .edit().putBoolean("task_jumped_out", true).apply();
+                } catch (Exception ignored) {}
+                lastOutput = "已交回主屏：" + pkg + " 已在实体屏重起（虚拟屏里的"
+                        + "当前页状态可能已丢失），后续在实体屏继续，任务结束回 GSIC 主页。";
+                log(lastOutput);
+                return true;
             }
             case "vd_tap": {
                 if (!ensureVdInput(ctx)) return false;

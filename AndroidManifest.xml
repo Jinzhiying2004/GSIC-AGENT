@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.gsic.app"
-    android:versionCode="189"
-    android:versionName="3.77">
+    android:versionCode="230"
+    android:versionName="4.18">
 
     <!-- INTERNET 仅用于首次下载官方 Termux 环境（约 30MB，一次性）；日常使用仍本地执行 -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -45,6 +45,8 @@
         android:theme="@android:style/Theme.Material.Light">
         <activity android:name=".MainActivity"
             android:exported="true"
+            android:theme="@android:style/Theme.Material.Light.NoActionBar"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

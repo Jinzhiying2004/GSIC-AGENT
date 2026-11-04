@@ -106,7 +106,15 @@ public class ApiHandler implements AgentHttpServer.Handler {
                         .put("core_first", firstCore)
                         .put("cf_tunnel_running", CloudflareTunnel.isRunning())
                         .put("cf_tunnel_url", CloudflareTunnel.getUrl())
-                        .put("cf_tunnel_proxy", CloudflareTunnel.isProxyMode(ctx));
+                        .put("cf_tunnel_proxy", CloudflareTunnel.isProxyMode(ctx))
+                        .put("cf_tunnel_url_changed", CloudflareTunnel.isUrlChanged())
+                        .put("cf_tunnel_prev_url", CloudflareTunnel.getPrevUrl())
+                        .put("cf_tunnel_reconnects", CloudflareTunnel.getReconnectCount())
+                        .put("cf_tunnel_auto_reconnect", CloudflareTunnel.isAutoReconnect())
+                        .put("tsnet_running", TsnetNode.isRunning())
+                        .put("tsnet_ip", TsnetNode.getTailIp())
+                        .put("tsnet_reconnects", TsnetNode.getReconnectCount())
+                        .put("tsnet_auto_reconnect", TsnetNode.isAutoReconnect());
                 if (firstCore) st.put("core", TermsGate.CORE_TEXT);
                 return st.toString();
             }
@@ -365,7 +373,64 @@ public class ApiHandler implements AgentHttpServer.Handler {
                 List<String> logs = new ArrayList<>();
                 TaskRunner r = new TaskRunner(ctx, logs::add);
                 r.setRemote(true);
+                // v4.08 所有软件优先虚拟屏：步骤任务也一样——
+                // 没虚拟屏时先建屏（task_vd_default 关了不建），
+                // 建成了步骤里的 launch/tap/input 等自动改写为 vd_*；
+                // 已有别的任务在用虚拟屏时不抢（步骤留在实体屏，
+                // 显式 vd_* 步骤仍直通虚拟屏）；建屏失败回实体屏；
+                // 本任务建的屏跑完即销毁，不留空虚拟屏占着主页。
+                boolean createdVd = false;
+                try {
+                    boolean vdOn = ctx.getSharedPreferences("agent",
+                            Context.MODE_PRIVATE)
+                            .getBoolean("task_vd_default", true);
+                    if (vdOn && !VirtualDisplayManager.isActive()) {
+                        int did = VirtualDisplayManager.create(
+                                ctx, 720, 1280, 320);
+                        if (did >= 0) {
+                            createdVd = true;
+                            r.setVdMode(true);
+                            logs.add("所有软件优先虚拟屏：已建虚拟屏并锁定");
+                        } else {
+                            // v4.14 补：建屏失败也是跳到实体屏跑，
+                            // 结束同样回 GSIC 主页（与软件不支持同理）。
+                            ctx.getSharedPreferences("agent",
+                                    android.content.Context.MODE_PRIVATE)
+                                    .edit().putBoolean("task_jumped_out", true).apply();
+                        }
+                    }
+                } catch (Exception ignored) {}
                 boolean ok = r.run(body);
+                try {
+                    if (createdVd) VirtualDisplayManager.destroy();
+                } catch (Exception ignored) {}
+                // v4.14 补（用户 11-03 亲定）：步骤任务跳出后也回
+                // GSIC 主页——下次打开的标签页记为主页，并把 GSIC
+                // 拉到前台（横屏即横屏模式、竖屏即主页）。
+                try {
+                    boolean jumped = ctx.getSharedPreferences("agent",
+                            android.content.Context.MODE_PRIVATE)
+                            .getBoolean("task_jumped_out", false);
+                    if (jumped) {
+                        ctx.getSharedPreferences("agent",
+                                android.content.Context.MODE_PRIVATE)
+                                .edit().putBoolean("task_jumped_out", false).apply();
+                        ctx.getSharedPreferences("ui",
+                                android.content.Context.MODE_PRIVATE)
+                                .edit().putInt("tab", 0).apply();
+                        try {
+                            android.content.Intent it = new android.content.Intent(
+                                    ctx, MainActivity.class);
+                            it.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                                    | android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
+                                    | android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP);
+                            ctx.startActivity(it);
+                            logs.add("跳出任务结束，已回 GSIC 主页");
+                        } catch (Exception e) {
+                            logs.add("跳出任务结束回 GSIC 主页失败（下次打开仍为主页）");
+                        }
+                    }
+                } catch (Exception ignored) {}
                 return new JSONObject().put("ok", ok).put("log", new JSONArray(logs)).toString();
             }
             case "/task/status": {

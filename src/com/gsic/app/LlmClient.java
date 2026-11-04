@@ -36,6 +36,74 @@ public class LlmClient {
         public long tokOut = -1;
     }
 
+    // ---------------- v3.83 第一批：流式输出（App 内对话先行） ----------------
+    /**
+     * 流式事件密封类型（OpenMinis LLMStreamChunk 思路的自写实现，非其代码）。
+     * 文本、工具调用开始/增量/完成、结束、错误是同一条流里的不同事件；
+     * 调用方只有收到 ToolDone 才能执行工具调用，未拼完的 ToolDelta 绝不执行。
+     */
+    public static abstract class StreamChunk {
+        public enum Kind { TEXT, TOOL_START, TOOL_DELTA, TOOL_DONE, DONE, ERROR }
+        public final Kind kind;
+        protected StreamChunk(Kind k) { kind = k; }
+        public static final class Text extends StreamChunk {
+            public final String text;
+            public Text(String t) { super(Kind.TEXT); text = t; }
+        }
+        public static final class ToolStart extends StreamChunk {
+            public final int index; public final String callId; public final String name;
+            public ToolStart(int i, String id, String n) { super(Kind.TOOL_START); index = i; callId = id; name = n; }
+        }
+        public static final class ToolDelta extends StreamChunk {
+            public final int index; public final String fragment;
+            public ToolDelta(int i, String f) { super(Kind.TOOL_DELTA); index = i; fragment = f; }
+        }
+        public static final class ToolDone extends StreamChunk {
+            public final int index; public final String callId; public final String name; public final String argsJson;
+            public ToolDone(int i, String id, String n, String a) { super(Kind.TOOL_DONE); index = i; callId = id; name = n; argsJson = a; }
+        }
+        public static final class Done extends StreamChunk {
+            public Done() { super(Kind.DONE); }
+        }
+        public static final class Error extends StreamChunk {
+            public final String message;
+            public Error(String m) { super(Kind.ERROR); message = m; }
+        }
+    }
+
+    /** 流式事件监听（UI 线程外回调，调用方自行 post 到 UI 线程）。 */
+    public interface StreamListener {
+        void onChunk(StreamChunk c);
+    }
+
+    /**
+     * 真取消句柄：cancel() 置位并立即 disconnect 底层连接，中断 HTTP；
+     * 只停渲染不算取消，调用方必须同时停掉正在执行的动作。
+     */
+    public static class StreamHandle {
+        private volatile boolean cancelled = false;
+        private volatile HttpURLConnection conn = null;
+        public void cancel() {
+            cancelled = true;
+            HttpURLConnection c = conn;
+            if (c != null) { try { c.disconnect(); } catch (Exception ignored) {} }
+        }
+        public boolean isCancelled() { return cancelled; }
+        void attach(HttpURLConnection c) {
+            conn = c;
+            if (cancelled) { try { c.disconnect(); } catch (Exception ignored) {} }
+        }
+    }
+
+    /** 流式调用结果（供同步包装判断是否回退旧路径）。 */
+    public static class StreamOutcome {
+        public boolean ok = false;
+        public boolean cancelled = false;
+        public boolean httpToolsRejected = false;
+        public boolean needFallback = false;
+        public String error = "";
+    }
+
     // ---------------- v3.51 步骤5：模型调用画像打点 ----------------
 
     /**
@@ -87,10 +155,276 @@ public class LlmClient {
      * 不记 prompt 原文。原实现下沉为 doChatTools，调用方签名不变。
      */
     public ToolReply chatTools(org.json.JSONArray messages, org.json.JSONArray tools) {
+        return chatTools(messages, tools, null);
+    }
+
+    /**
+     * v3.83：同步工具调用改成内部走流、外部拼结果（调用方签名不变）。
+     * 只有收到 ToolDone 的调用才进 tr.calls；流失败时回退旧的非流式路径
+     * （模型端不支持工具调用时由旧路径返回 httpToolsRejected，调用方行为不变）；
+     * 取消不回退，直接返回“已取消”。
+     */
+    public ToolReply chatTools(org.json.JSONArray messages, org.json.JSONArray tools,
+                               java.util.function.BooleanSupplier cancelCheck) {
         long t0 = System.currentTimeMillis();
-        ToolReply tr = doChatTools(messages, tools);
+        final StringBuilder textAcc = new StringBuilder();
+        final java.util.List<org.json.JSONObject> doneCalls = new java.util.ArrayList<>();
+        StreamHandle handle = new StreamHandle();
+        // v3.83：真取消 watcher——流停滞无新行时，仅靠行间 cancelCheck 查不到停止；
+        // 200ms 轮询一次，命中即 disconnect，阻塞的 readLine 立即抛错返回“已取消”。
+        final java.util.concurrent.atomic.AtomicBoolean streamDone =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+        Thread watcher = null;
+        if (cancelCheck != null) {
+            watcher = new Thread(() -> {
+                try {
+                    while (!streamDone.get() && !handle.isCancelled()) {
+                        if (cancelCheck.getAsBoolean()) {
+                            handle.cancel();
+                            break;
+                        }
+                        Thread.sleep(200);
+                    }
+                } catch (InterruptedException ignored) {
+                }
+            });
+            watcher.setDaemon(true);
+            watcher.start();
+        }
+        StreamOutcome oc = chatToolsStream(messages, tools, c -> {
+            if (c instanceof StreamChunk.Text) {
+                textAcc.append(((StreamChunk.Text) c).text);
+            } else if (c instanceof StreamChunk.ToolDone) {
+                StreamChunk.ToolDone d = (StreamChunk.ToolDone) c;
+                try {
+                    org.json.JSONObject one = new org.json.JSONObject();
+                    one.put("id", d.callId);
+                    one.put("name", d.name);
+                    one.put("argsJson", d.argsJson);
+                    doneCalls.add(one);
+                } catch (Exception ignored) {
+                }
+            }
+        }, handle, cancelCheck);
+        streamDone.set(true);
+        if (watcher != null) watcher.interrupt();
+        ToolReply tr;
+        if (oc.cancelled) {
+            tr = new ToolReply();
+            tr.ok = false;
+            tr.error = "已取消";
+        } else if (oc.ok) {
+            tr = new ToolReply();
+            tr.ok = true;
+            tr.text = textAcc.toString();
+            tr.calls = doneCalls;
+        } else if (oc.needFallback) {
+            tr = doChatTools(messages, tools);
+        } else {
+            tr = new ToolReply();
+            tr.ok = false;
+            tr.error = oc.error;
+            tr.httpToolsRejected = oc.httpToolsRejected;
+        }
         reportCall(t0, tr.tokIn, tr.tokOut, tr.ok ? null : tr.error, 0);
         return tr;
+    }
+
+    /** 流式工具调用：发 stream=true，解析 SSE delta 为 StreamChunk 序列。 */
+    public StreamOutcome chatToolsStream(org.json.JSONArray messages, org.json.JSONArray tools,
+                                         StreamListener listener, StreamHandle handle,
+                                         java.util.function.BooleanSupplier cancelCheck) {
+        StreamOutcome oc = new StreamOutcome();
+        java.util.Map<Integer, String[]> acc = new java.util.TreeMap<>();
+        java.util.Map<Integer, StringBuilder> accArgs = new java.util.TreeMap<>();
+        boolean[] finished = new boolean[1];
+        try {
+            org.json.JSONObject payload = buildChatPayload(messages, tools);
+            payload.put("stream", true);
+            HttpURLConnection c = open("/chat/completions", "POST");
+            if (handle != null) handle.attach(c);
+            byte[] bytes = payload.toString().getBytes(StandardCharsets.UTF_8);
+            c.setDoOutput(true);
+            c.setRequestProperty("Content-Type", "application/json");
+            c.setRequestProperty("Accept", "text/event-stream");
+            try (OutputStream os = c.getOutputStream()) { os.write(bytes); }
+            int code = c.getResponseCode();
+            if (code != 200) {
+                String body = readBody(c, code);
+                String low = body.toLowerCase();
+                oc.httpToolsRejected = (code == 400 || code == 404)
+                        && (low.contains("tool") || low.contains("function"));
+                oc.error = "HTTP " + code + "：" + brief(body);
+                oc.needFallback = true;
+                if (listener != null) {
+                    try { listener.onChunk(new StreamChunk.Error(oc.error)); } catch (Exception ignored) {}
+                }
+                return oc;
+            }
+            boolean sawToolFinish = false;
+            try (java.io.BufferedReader br = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(c.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = br.readLine()) != null) {
+                    if ((handle != null && handle.isCancelled())
+                            || (cancelCheck != null && cancelCheck.getAsBoolean())) {
+                        try { c.disconnect(); } catch (Exception ignored) {}
+                        oc.cancelled = true;
+                        oc.error = "已取消";
+                        if (listener != null) {
+                            try { listener.onChunk(new StreamChunk.Error(oc.error)); } catch (Exception ignored) {}
+                        }
+                        return oc;
+                    }
+                    line = line.trim();
+                    if (!line.startsWith("data:")) continue;
+                    String data = line.substring(5).trim();
+                    if ("[DONE]".equals(data)) {
+                        if (!acc.isEmpty() && !sawToolFinish) {
+                            // 未见 tool_calls 结束信号就断流：参数可能没拼完，绝不发 ToolDone
+                            oc.error = "流式输出未完成（工具参数未拼完）";
+                            oc.needFallback = true;
+                            if (listener != null) {
+                                try { listener.onChunk(new StreamChunk.Error(oc.error)); } catch (Exception ignored) {}
+                            }
+                            return oc;
+                        }
+                        if (listener != null && !finished[0]) {
+                            try { listener.onChunk(new StreamChunk.Done()); } catch (Exception ignored) {}
+                        }
+                        finished[0] = true;
+                        break;
+                    }
+                    try {
+                        org.json.JSONObject o = new org.json.JSONObject(data);
+                        org.json.JSONArray choices = o.optJSONArray("choices");
+                        if (choices == null || choices.length() == 0) continue;
+                        org.json.JSONObject ch0 = choices.optJSONObject(0);
+                        org.json.JSONObject delta = ch0.optJSONObject("delta");
+                        String fr = ch0.optString("finish_reason", "");
+                        if (delta != null) {
+                            String token = sanitizeStreamToken(delta);
+                            if (token != null && listener != null) {
+                                try { listener.onChunk(new StreamChunk.Text(token)); } catch (Exception ignored) {}
+                            }
+                            org.json.JSONArray tcs = delta.optJSONArray("tool_calls");
+                            if (tcs != null) {
+                                for (int i = 0; i < tcs.length(); i++) {
+                                    org.json.JSONObject tc = tcs.optJSONObject(i);
+                                    if (tc == null) continue;
+                                    int idx = tc.optInt("index", 0);
+                                    org.json.JSONObject fn = tc.optJSONObject("function");
+                                    String nm = fn == null ? "" : fn.optString("name", "");
+                                    String frag = fn == null ? "" : fn.optString("arguments", "");
+                                    if (!acc.containsKey(idx)) {
+                                        String id = tc.optString("id", "");
+                                        if (id.isEmpty()) id = "call_" + idx;
+                                        acc.put(idx, new String[]{id, nm});
+                                        accArgs.put(idx, new StringBuilder());
+                                        if (listener != null) {
+                                            try { listener.onChunk(new StreamChunk.ToolStart(idx, id, nm)); } catch (Exception ignored) {}
+                                        }
+                                    }
+                                    if (fn != null && !nm.isEmpty() && acc.get(idx)[1].isEmpty()) {
+                                        acc.get(idx)[1] = nm;
+                                    }
+                                    if (frag != null && !frag.isEmpty()) {
+                                        accArgs.get(idx).append(frag);
+                                        if (listener != null) {
+                                            try { listener.onChunk(new StreamChunk.ToolDelta(idx, frag)); } catch (Exception ignored) {}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (fr != null && !fr.isEmpty() && !"null".equals(fr)) {
+                            if ("tool_calls".equals(fr)) {
+                                sawToolFinish = true;
+                                for (java.util.Map.Entry<Integer, String[]> e : acc.entrySet()) {
+                                    String a = accArgs.get(e.getKey()).toString();
+                                    if (a.isEmpty()) a = "{}";
+                                    if (listener != null) {
+                                        try { listener.onChunk(new StreamChunk.ToolDone(e.getKey(), e.getValue()[0], e.getValue()[1], a)); } catch (Exception ignored) {}
+                                    }
+                                }
+                                acc.clear();
+                                accArgs.clear();
+                            }
+                        }
+                    } catch (Exception ignored) {
+                        // 单行解析失败跳过
+                    }
+                }
+            }
+            if (!acc.isEmpty() && !sawToolFinish && !oc.cancelled) {
+                // 服务器未发 [DONE] 就断流且工具参数没拼完：与 [DONE] 分支一致，绝不发 ToolDone
+                oc.error = "流式输出未完成（工具参数未拼完）";
+                oc.needFallback = true;
+                if (listener != null) {
+                    try { listener.onChunk(new StreamChunk.Error(oc.error)); } catch (Exception ignored) {}
+                }
+                return oc;
+            }
+            if (!finished[0] && !oc.cancelled) {
+                if (listener != null) {
+                    try { listener.onChunk(new StreamChunk.Done()); } catch (Exception ignored) {}
+                }
+            }
+            oc.ok = true;
+            return oc;
+        } catch (Exception e) {
+            if ((handle != null && handle.isCancelled())
+                    || (cancelCheck != null && cancelCheck.getAsBoolean())) {
+                oc.cancelled = true;
+                oc.error = "已取消";
+            } else {
+                oc.error = "请求失败：" + e.getMessage();
+                oc.needFallback = true;
+            }
+            if (listener != null) {
+                try { listener.onChunk(new StreamChunk.Error(oc.error)); } catch (Exception ignored) {}
+            }
+            return oc;
+        }
+    }
+
+    /** 组装 /chat/completions 请求体（流式路径用，与 doChatTools 的构造一致）。 */
+    private org.json.JSONObject buildChatPayload(org.json.JSONArray messages, org.json.JSONArray tools) throws Exception {
+        org.json.JSONObject payload = new org.json.JSONObject();
+        payload.put("model", model);
+        org.json.JSONArray msgs = new org.json.JSONArray();
+        for (int i = 0; i < messages.length(); i++) {
+            org.json.JSONObject m = messages.getJSONObject(i);
+            org.json.JSONObject o = new org.json.JSONObject();
+            o.put("role", m.optString("role", "user"));
+            String img = m.optString("image_b64", "");
+            if (!img.isEmpty()) {
+                org.json.JSONArray content = new org.json.JSONArray();
+                org.json.JSONObject t = new org.json.JSONObject();
+                t.put("type", "text");
+                t.put("text", m.optString("content", ""));
+                content.put(t);
+                org.json.JSONObject iu = new org.json.JSONObject();
+                iu.put("type", "image_url");
+                org.json.JSONObject url = new org.json.JSONObject();
+                url.put("url", "data:image/jpeg;base64," + img);
+                iu.put("image_url", url);
+                content.put(iu);
+                o.put("content", content);
+            } else {
+                o.put("content", m.optString("content", ""));
+            }
+            if (m.has("tool_calls")) o.put("tool_calls", m.getJSONArray("tool_calls"));
+            if (m.has("tool_call_id")) o.put("tool_call_id", m.getString("tool_call_id"));
+            if (m.has("name")) o.put("name", m.getString("name"));
+            msgs.put(o);
+        }
+        payload.put("messages", msgs);
+        if (tools != null && tools.length() > 0) {
+            payload.put("tools", tools);
+            payload.put("tool_choice", "auto");
+        }
+        return payload;
     }
 
     private ToolReply doChatTools(org.json.JSONArray messages, org.json.JSONArray tools) {
@@ -267,18 +601,24 @@ public class LlmClient {
      * 每个 token 到达时调 onToken，全收完返回完整 Result。
      */
     public Result chatStream(String prompt, StreamCallback cb) {
+        return chatStream(prompt, cb, null);
+    }
+
+    /** v3.83：可取消的流式输出；handle.cancel() 会中断 HTTP，调用方同时停动作才算真取消。 */
+    public Result chatStream(String prompt, StreamCallback cb, StreamHandle handle) {
         // v3.51 步骤5：打点包装（SSE 无 usage，tok=-1）
         long t0 = System.currentTimeMillis();
-        Result r = doChatStream(prompt, cb);
+        Result r = doChatStream(prompt, cb, handle);
         reportCall(t0, r.tokIn, r.tokOut, r.ok ? null : r.text, 0);
         return r;
     }
 
-    private Result doChatStream(String prompt, StreamCallback cb) {
+    private Result doChatStream(String prompt, StreamCallback cb, StreamHandle handle) {
         Result r = new Result();
         StringBuilder full = new StringBuilder();
         try {
             HttpURLConnection c = open("/chat/completions", "POST");
+            if (handle != null) handle.attach(c);
             String payload = "{\"model\":\"" + esc(model)
                     + "\",\"stream\":true"
                     + ",\"messages\":[{\"role\":\"user\",\"content\":\""
@@ -302,6 +642,12 @@ public class LlmClient {
                             StandardCharsets.UTF_8))) {
                 String line;
                 while ((line = br.readLine()) != null) {
+                    if (handle != null && handle.isCancelled()) {
+                        try { c.disconnect(); } catch (Exception ignored) {}
+                        r.ok = false;
+                        r.text = "已取消";
+                        return r;
+                    }
                     line = line.trim();
                     if (!line.startsWith("data:")) continue;
                     String data = line.substring(5).trim();
@@ -328,8 +674,13 @@ public class LlmClient {
             r.ok = true;
             r.text = full.toString();
         } catch (Exception e) {
-            r.ok = false;
-            r.text = "请求失败：" + e.getMessage();
+            if (handle != null && handle.isCancelled()) {
+                r.ok = false;
+                r.text = "已取消";
+            } else {
+                r.ok = false;
+                r.text = "请求失败：" + e.getMessage();
+            }
         }
         return r;
     }

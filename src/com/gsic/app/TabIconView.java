@@ -23,6 +23,7 @@ public class TabIconView extends View {
     public static final int MY = 4;
 
     private static final int IDLE_COLOR = 0xFF666666;
+    private static final int IDLE_COLOR_NIGHT = 0xFFAAAAAA;
 
     private final int kind;
     private boolean active = false;
@@ -61,7 +62,9 @@ public class TabIconView extends View {
         int w = getWidth();
         int h = getHeight();
         if (w <= 0 || h <= 0) return;
-        int iconColor = IDLE_COLOR;
+        // v4.07 夜间模式：未选中图标在深色胶囊上要浅一点才看得见
+        int iconColor = DyColor.isDark(getContext())
+                ? IDLE_COLOR_NIGHT : IDLE_COLOR;
         if (active) {
             bg.setColor(DyColor.primary(getContext()));
             float insetX = dp(3);
