@@ -1,5 +1,6 @@
 import android.os.SystemClock;
 import android.view.InputEvent;
+import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import java.lang.reflect.Method;
@@ -67,6 +68,9 @@ public class VdInput {
                 MotionEvent.ACTION_DOWN, x, y, 0);
         MotionEvent up = MotionEvent.obtain(now, now + 80,
                 MotionEvent.ACTION_UP, x, y, 0);
+        // v4.19：obtain 出来的事件源是未知，补 touchscreen 源，否则注入回执成功也到不了应用窗口。
+        down.setSource(InputDevice.SOURCE_TOUCHSCREEN);
+        up.setSource(InputDevice.SOURCE_TOUCHSCREEN);
         setDid(down, displayId);
         setDid(up, displayId);
         boolean r1 = (Boolean) inject.invoke(im, down, 0);
@@ -82,6 +86,7 @@ public class VdInput {
         long now = SystemClock.uptimeMillis();
         MotionEvent down = MotionEvent.obtain(now, now,
                 MotionEvent.ACTION_DOWN, x1, y1, 0);
+        down.setSource(InputDevice.SOURCE_TOUCHSCREEN);
         setDid(down, displayId);
         inject.invoke(im, down, 0);
 
@@ -93,6 +98,7 @@ public class VdInput {
             long t = now + (long) duration * i / steps;
             MotionEvent move = MotionEvent.obtain(now, t,
                     MotionEvent.ACTION_MOVE, x, y, 0);
+            move.setSource(InputDevice.SOURCE_TOUCHSCREEN);
             setDid(move, displayId);
             ok &= (Boolean) inject.invoke(im, move, 0);
             move.recycle();
@@ -102,6 +108,7 @@ public class VdInput {
         long end = now + duration + 50;
         MotionEvent up = MotionEvent.obtain(now, end,
                 MotionEvent.ACTION_UP, x2, y2, 0);
+        up.setSource(InputDevice.SOURCE_TOUCHSCREEN);
         setDid(up, displayId);
         ok &= (Boolean) inject.invoke(im, up, 0);
         down.recycle();

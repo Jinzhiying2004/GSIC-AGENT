@@ -15,6 +15,7 @@ import android.widget.FrameLayout;
  * 与 App 内横屏章鱼待机（MainActivity.enterStandby）同款显示、
  * 不同宿主——App 内版只在 GSIC 横屏主页 resumed 时存在，锁屏版
  * 由 AgentService 在锁屏亮屏时挂出，GSIC 不在前台也能显示。
+ * v4.20 起默认关（用户 11-06 令）：ui.lock_standby 默认 false，锁屏亮屏不再自动挂出，设置里手动打开仍可恢复。
  *
  * 关键边界，一律不碰解锁安全：
  * - 只用 FLAG_SHOW_WHEN_LOCKED 盖在锁屏上面显示，绝不用
@@ -48,7 +49,7 @@ public class LockStandby {
             Context ac = ctx.getApplicationContext();
             if (lockView != null) return;
             if (!FloatWindow.hasPermission(ac)) return;
-            if (!SettingRegistry.getBool(ac, "ui.lock_standby", true)) return;
+            if (!SettingRegistry.getBool(ac, "ui.lock_standby", false)) return;
             if (FloatWindow.isTaskActive()) return;
             if (VirtualDisplayManager.isActive()) return;
             android.app.KeyguardManager km =

@@ -61,9 +61,9 @@ public class SettingRegistry {
         x.def = "true"; out.add(x);
         x = f("ui.standby_seconds", G_UI, "章鱼待机时间（秒）", "横屏无操作多少秒后进章鱼待机（默认 1800 秒即 30 分钟；设置里可手动改任意秒数，保存后立即按新时间重算）", Kind.INT);
         x.def = "1800"; x.min = 1; x.max = Integer.MAX_VALUE; out.add(x);
-        // v4.18 锁屏章鱼待机：默认开；关了则锁屏亮屏时不再挂黑屏章鱼
-        x = f("ui.lock_standby", G_UI, "锁屏章鱼待机", "开机自启后，锁屏亮屏时也显示黑屏章鱼（仅显示、不挡解锁：滑动解锁、输密码、人脸解锁都穿透；任务开始、解锁、灭屏时自动收起；需悬浮窗权限）", Kind.BOOL);
-        x.def = "true"; out.add(x);
+        // v4.18 锁屏章鱼待机；v4.20 起默认关（用户 11-06 令）：关了则锁屏亮屏时不再挂黑屏章鱼
+        x = f("ui.lock_standby", G_UI, "锁屏章鱼待机", "默认关闭；打开后开机自启后锁屏亮屏时也显示黑屏章鱼（仅显示、不挡解锁：滑动解锁、输密码、人脸解锁都穿透；任务开始、解锁、灭屏时自动收起；需悬浮窗权限）", Kind.BOOL);
+        x.def = "false"; out.add(x);
         x = f("conn.remote_port", G_CONN, "远控端口", "只读：当前 HTTP 服务端口", Kind.INFO);
         out.add(x);
         x = f("conn.remote_service", G_CONN, "远程控制服务", "开关与端口在原卡", Kind.JUMP);

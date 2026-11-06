@@ -555,7 +555,7 @@ public class TaskRunner {
     }
 
     /** VdInput dex 版本：改 tools/VdInput.java 后 +1，触发重新释放 */
-    private static final int VD_DEX_VER = 2;
+    private static final int VD_DEX_VER = 3;
 
     /** 确保 VdInput dex 已从 assets 拷贝 */
     private boolean ensureVdInput(android.content.Context c) {

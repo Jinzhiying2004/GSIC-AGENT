@@ -64,9 +64,25 @@ public class VirtualDisplayManager {
             }, new Handler(frameThread.getLooper()));
             DisplayManager dm = (DisplayManager) ctx.getSystemService(
                     Context.DISPLAY_SERVICE);
-            vd = dm.createVirtualDisplay("agent_vd",
-                    w, h, dpi, reader.getSurface(),
-                    DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY);
+            // v4.19 虚拟屏触摸修复：此前只传 OWN_CONTENT_ONLY，触摸注入到不了应用。
+            // AOSP 值（隐藏 API，公开 jar 里没有，用数值字面量）：
+            // SUPPORTS_TOUCH = 1<<6，TRUSTED = 1<<10（受信屏才能在无用户触摸时接收注入输入），
+            // OWN_FOCUS = 1<<14（屏自有焦点，须先受信）。
+            // 先按受信全套试建；系统若拒非系统应用建受信屏，自动回退到仅 SUPPORTS_TOUCH 再建一次。
+            int vdFlagsTrusted = DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
+                    | (1 << 6) | (1 << 10) | (1 << 14);
+            int vdFlagsTouchOnly = DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
+                    | (1 << 6);
+            try {
+                vd = dm.createVirtualDisplay("agent_vd",
+                        w, h, dpi, reader.getSurface(), vdFlagsTrusted);
+                Log.i(TAG, "虚拟屏受信建屏成功 flags=" + vdFlagsTrusted);
+            } catch (Exception e1) {
+                Log.i(TAG, "虚拟屏受信建屏被拒，回退仅触摸 flags=" + vdFlagsTouchOnly
+                        + " 原因: " + e1.getMessage());
+                vd = dm.createVirtualDisplay("agent_vd",
+                        w, h, dpi, reader.getSurface(), vdFlagsTouchOnly);
+            }
             displayId = vd.getDisplay().getDisplayId();
             appCtx = ctx.getApplicationContext();
             if (previewEnabled) startPreview();
