@@ -14,7 +14,8 @@ import javax.crypto.spec.GCMParameterSpec;
 
 /**
  * v3.13 Issue 2：Android Keystore AES/GCM 加密。
- * 敏感字段加密后落盘；Keystore 不可用时降级为明文（打日志警告，保证 App 不崩）。
+ * 敏感字段加密后落盘；Keystore 不可用时加密抛异常、调用方拒绝保存
+ *（Issue #1：不再降级明文——旧版静默明文落盘是安全缺陷）。
  * 加密串以 "ENC:" 开头，便于识别与迁移。
  */
 public class CryptoUtil {
@@ -29,7 +30,7 @@ public class CryptoUtil {
         return v != null && v.startsWith(PREFIX);
     }
 
-    /** 加密；失败返回原文（降级） */
+    /** 加密；失败抛 IllegalStateException（拒绝明文降级，Issue #1） */
     public static String encrypt(String plain) {
         if (plain == null || plain.isEmpty()) return plain == null ? "" : plain;
         try {
@@ -44,9 +45,9 @@ public class CryptoUtil {
             System.arraycopy(ct, 0, out, iv.length, ct.length);
             return PREFIX + Base64.encodeToString(out, Base64.NO_WRAP);
         } catch (Exception e) {
-            android.util.Log.w("CryptoUtil",
-                    "Keystore 加密失败，降级明文存储", e);
-            return plain;
+            android.util.Log.e("CryptoUtil",
+                    "Keystore 加密失败，拒绝保存", e);
+            throw new IllegalStateException("Keystore 加密失败", e);
         }
     }
 

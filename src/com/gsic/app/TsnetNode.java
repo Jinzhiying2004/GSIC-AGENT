@@ -11,6 +11,7 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.security.MessageDigest;
+import org.json.JSONObject;
 
 /**
  * v3.82：内置 Tailscale 节点（Go 小进程模型，照 cloudflared 内置的同一套路）。
@@ -67,6 +68,25 @@ public class TsnetNode {
     private static volatile boolean autoReconnect = false;
     private static volatile int reconnectCount = 0;
     private static volatile int lastReconnectDelaySec = 0;
+    // v4.21 断连自动重启 + 心跳：
+    // lastNetState/lastNetAt：Go 侧 TSNET_NET= 行的最新后端状态与到达时间；
+    // lastIpAt：最近一次拿到 tailnet IP 的时间；disconnectRestarts：因断连
+    // （进程活着但无 IP / 后端长期非 Running / 长期无状态上报）而杀进程
+    // 重启的次数；lastDisconnectRestartAt：最近一次断连重启时间。
+    private static volatile String lastNetState = "";
+    private static volatile long lastNetAt = 0;
+    private static volatile long lastIpAt = 0;
+    private static volatile int disconnectRestarts = 0;
+    private static volatile long lastDisconnectRestartAt = 0;
+    // 心跳：最近一次心跳时间与心跳时的 IP；心跳线程见 startHeartbeatIfNeeded。
+    private static volatile long lastHeartbeatTs = 0;
+    private static volatile String lastHeartbeatIp = "";
+    private static volatile Thread heartbeatThread = null;
+    // v4.21 断连判定阈值：无 IP 超 90 秒、后端非 Running 超 90 秒、
+    // 状态上报静默超 120 秒，任一即断连重启。
+    private static final long NO_IP_RESTART_MS = 90_000;
+    private static final long NET_STALE_RESTART_MS = 90_000;
+    private static final long NET_SILENT_RESTART_MS = 120_000;
     private static volatile OutputStream procStdin = null;
     // 进程代际：每次新起进程或停进程时 +1，旧线程的重连循环见代际变了就退出，
     // 防止“停旧进程起新进程”后旧线程又拉起第二个进程抢 stdout 与监听。
@@ -180,6 +200,44 @@ public class TsnetNode {
 
     public static int getReconnectCount() {
         return reconnectCount;
+    }
+
+    /** v4.21：因断连而杀进程重启的累计次数。 */
+    public static int getDisconnectRestarts() {
+        return disconnectRestarts;
+    }
+
+    /** v4.21：最近一次断连重启时间（毫秒 epoch，0 表示未发生）。 */
+    public static long getLastDisconnectRestartAt() {
+        return lastDisconnectRestartAt;
+    }
+
+    /** v4.21：最近一次拿到 tailnet IP 的时间（毫秒 epoch，0 表示未拿到）。 */
+    public static long getLastIpAt() {
+        return lastIpAt;
+    }
+
+    /** v4.21：Go 侧上报的最新后端状态（Running 等，空表示未收到）。 */
+    public static String getLastNetState() {
+        return lastNetState == null ? "" : lastNetState;
+    }
+
+    /** v4.21：最近一次心跳时间（毫秒 epoch，0 表示未心跳）。 */
+    public static long getLastHeartbeatTs() {
+        return lastHeartbeatTs;
+    }
+
+    /** v4.21：最近一次心跳时的 tailnet IP（空表示当时无 IP）。 */
+    public static String getLastHeartbeatIp() {
+        return lastHeartbeatIp == null ? "" : lastHeartbeatIp;
+    }
+
+    /** v4.21：节点自启动起的运行秒数，未运行返回 0。 */
+    public static long getNodeUptimeSec() {
+        if (!isRunning() || startedAt <= 0) {
+            return 0;
+        }
+        return (System.currentTimeMillis() - startedAt) / 1000;
     }
 
     public static boolean isAutoReconnect() {
@@ -464,6 +522,7 @@ public class TsnetNode {
                 || line.startsWith("TSNET_LOGIN_URL=")
                 || line.startsWith("TSNET_LOGIN_EXPIRED")
                 || line.startsWith("TSNET_STATUS=")
+                || line.startsWith("TSNET_NET=")
                 || line.startsWith("TSNET_ERROR="));
     }
 
@@ -518,8 +577,59 @@ public class TsnetNode {
                 if (!pidAlive(daemonPid)) {
                     return false;
                 }
+                // v4.21 断连自动重启：进程活着但节点不通时也重启，不等进程自己死。
+                // 杀进程后返回 false，外层 runDaemonLoop 按退避重起。
+                if (isDisconnectRestartDue()) {
+                    disconnectRestarts++;
+                    lastDisconnectRestartAt = System.currentTimeMillis();
+                    lastError = "内置节点断连，自动重启（第 " + disconnectRestarts + " 次）";
+                    notifyListeners();
+                    killDaemonPid(daemonPid);
+                    return false;
+                }
             }
             try { Thread.sleep(500); } catch (Exception ignored) {}
+        }
+    }
+
+    /** v4.21：进程活着但节点已断的判定，满足任一即断连：
+     * ① 90 秒都没有 IP（起不来、卡在登录/控制面 limbo）；
+     * ② 有 IP 但后端状态长期非 Running（控制面掉了）；
+     * ③ 有 IP 但 Go 的状态上报静默超过 120 秒（进程楔死）。
+     * 老二进制不发 TSNET_NET 时 lastNetAt 为 0，②③ 不触发，只认①。 */
+    private static boolean isDisconnectRestartDue() {
+        long now = System.currentTimeMillis();
+        if (tailIp == null || tailIp.isEmpty()) {
+            long sinceStart = now - startedAt;
+            long sinceIp = lastIpAt <= 0 ? sinceStart : now - lastIpAt;
+            return sinceStart > NO_IP_RESTART_MS && sinceIp > NO_IP_RESTART_MS;
+        }
+        if (lastNetState != null && !lastNetState.isEmpty()
+                && !"Running".equals(lastNetState)
+                && lastNetAt > 0 && now - lastNetAt > NET_STALE_RESTART_MS) {
+            return true;
+        }
+        if (lastNetAt > 0 && now - lastNetAt > NET_SILENT_RESTART_MS) {
+            return true;
+        }
+        return false;
+    }
+
+    /** v4.21：杀守护进程（TERM 等 1 秒，不死再 KILL），供断连重启调用。 */
+    private static void killDaemonPid(int pid) {
+        if (pid <= 0) {
+            return;
+        }
+        try {
+            rootExec("kill -TERM " + pid, 5);
+            long deadline = System.currentTimeMillis() + 1000;
+            while (pidAlive(pid) && System.currentTimeMillis() < deadline) {
+                try { Thread.sleep(50); } catch (Exception ignored) {}
+            }
+            if (pidAlive(pid)) {
+                rootExec("kill -KILL " + pid, 5);
+            }
+        } catch (Exception ignored) {
         }
     }
 
@@ -531,6 +641,11 @@ public class TsnetNode {
             runHadErrorLine = false;
             lastExitCode = -1;
             synchronized (rawTail) { rawTail.clear(); }
+            // v4.21：每轮重起都清掉上个进程的状态上报时间戳，防旧时间戳
+            // 让新进程一上来就误判断连（认领重放会按协议文件重新落定）。
+            lastNetState = "";
+            lastNetAt = 0;
+            lastIpAt = 0;
             boolean startedThisRun = false;
             boolean delegated = false;
             try {
@@ -678,6 +793,105 @@ public class TsnetNode {
         }
     }
 
+    /** v4.21 心跳：不定时（5-15 分钟随机）写一条心跳记录并上报。
+     * 内容只有存活状态（时间、是否在跑、IP、后端状态、重连/断连重启
+     * 次数、运行秒数、版本），不含密钥、链接、聊天内容。心跳只在节点
+     * 开关开着时跑，用户关节点即停；同一时刻只跑一个心跳线程。 */
+    private static void startHeartbeatIfNeeded(final Context appCtx) {
+        if (heartbeatThread != null && heartbeatThread.isAlive()) {
+            return;
+        }
+        heartbeatThread = new Thread(new Runnable() {
+            @Override public void run() {
+                java.util.Random rnd = new java.util.Random();
+                while (isEnabled(appCtx)) {
+                    try {
+                        writeHeartbeat(appCtx);
+                    } catch (Exception ignored) {}
+                    long waitMs = (5 + rnd.nextInt(11)) * 60L * 1000L;
+                    try {
+                        Thread.sleep(waitMs);
+                    } catch (Exception e) {
+                        return;
+                    }
+                }
+            }
+        }, "tsnet-heartbeat");
+        heartbeatThread.setDaemon(true);
+        heartbeatThread.start();
+    }
+
+    /** v4.21：写一次心跳。落盘到状态目录 heartbeat.json（/status 可见），
+     * 再尽力往中继 POST /heartbeat 上报（中继没配、没连上、超时都静默
+     * 跳过，等下次心跳再试，不阻塞、不重试风暴）。 */
+    private static void writeHeartbeat(Context ctx) {
+        long now = System.currentTimeMillis();
+        lastHeartbeatTs = now;
+        lastHeartbeatIp = tailIp == null ? "" : tailIp;
+        JSONObject hb = new JSONObject();
+        try {
+            hb.put("ts", now);
+            hb.put("running", isRunning());
+            hb.put("ip", lastHeartbeatIp);
+            hb.put("net", lastNetState == null ? "" : lastNetState);
+            hb.put("reconnects", reconnectCount);
+            hb.put("disconnect_restarts", disconnectRestarts);
+            hb.put("uptime_sec", getNodeUptimeSec());
+            hb.put("version", AppInfo.VERSION);
+        } catch (Exception ignored) {}
+        try {
+            File f = new File(getStateDir(ctx), "heartbeat.json");
+            FileOutputStream out = new FileOutputStream(f);
+            try {
+                out.write(hb.toString().getBytes("UTF-8"));
+            } finally {
+                try { out.close(); } catch (Exception ignored) {}
+            }
+        } catch (Exception ignored) {}
+        try {
+            if (!MuseRelayClient.hasConfig(ctx)) {
+                return;
+            }
+            String base = MuseRelayClient.getUrl(ctx);
+            while (base.endsWith("/")) {
+                base = base.substring(0, base.length() - 1);
+            }
+            String token = MuseRelayClient.getToken(ctx);
+            java.net.URL url = new java.net.URL(base + "/heartbeat?token="
+                    + java.net.URLEncoder.encode(token, "UTF-8"));
+            java.net.HttpURLConnection c = (java.net.HttpURLConnection) url.openConnection();
+            try {
+                c.setConnectTimeout(8000);
+                c.setReadTimeout(10000);
+                c.setRequestMethod("POST");
+                c.setDoOutput(true);
+                c.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+                byte[] data = hb.toString().getBytes("UTF-8");
+                java.io.OutputStream os = c.getOutputStream();
+                try {
+                    os.write(data);
+                    os.flush();
+                } finally {
+                    try { os.close(); } catch (Exception ignored) {}
+                }
+                int code = c.getResponseCode();
+                if (code < 200 || code >= 300) {
+                    throw new Exception("heartbeat http " + code);
+                }
+                try {
+                    java.io.InputStream in = c.getInputStream();
+                    if (in != null) {
+                        while (in.read() != -1) {
+                        }
+                        in.close();
+                    }
+                } catch (Exception ignored) {}
+            } finally {
+                c.disconnect();
+            }
+        } catch (Exception ignored) {}
+    }
+
     public static String statusText(Context ctx) {
         // v3.87：先判过期态再判等待态（过期分支已复位 loginWaiting，此处双保险，
         // 过期后绝不再显示“正在拉取”）。
@@ -702,6 +916,9 @@ public class TsnetNode {
                     .append("（X-Token 鉴权不变，tailnet 只换传输层）");
             if (reconnectCount > 0) {
                 sb.append("\n（已自动重连 ").append(reconnectCount).append(" 次）");
+            }
+            if (disconnectRestarts > 0) {
+                sb.append("\n（断连自动重启 ").append(disconnectRestarts).append(" 次）");
             }
             return sb.toString();
         }
@@ -871,6 +1088,8 @@ public class TsnetNode {
         lastError = "";
         tailIp = "";
         reconnectCount = 0;
+        // v4.21：节点启动即起心跳（开关开着才跑，关节点即停）。
+        startHeartbeatIfNeeded(ctx.getApplicationContext());
         final Context appCtx = ctx.getApplicationContext();
         // v3.85 修：网页登录模式一律不读已保存密钥、不传 TSNET_AUTHKEY，
         // 否则 Go 走密钥认证、永不出登录链接；密钥路径才读 key。
@@ -1090,6 +1309,7 @@ public class TsnetNode {
         boolean changed = false;
         if (line.startsWith("TSNET_IP=")) {
             tailIp = line.substring("TSNET_IP=".length());
+            lastIpAt = System.currentTimeMillis();
             // 上线即完成授权：链接不再有效，立即清掉。
             loginWaiting = false;
             loginExpired = false;
@@ -1098,11 +1318,18 @@ public class TsnetNode {
             lastError = "";  // 上线成功：旧死因清掉，不留过期错误。
             changed = true;
         } else if (line.startsWith("TSNET_READY")) {
+            lastIpAt = System.currentTimeMillis();
             loginWaiting = false;
             loginExpired = false;
             loginUrl = "";
             loginStatus = "";
             lastError = "";  // 上线成功：旧死因清掉。
+            changed = true;
+        } else if (line.startsWith("TSNET_NET=")) {
+            // v4.21 运行态上报：只存状态词与到达时间，不含密钥与链接。
+            String ns = line.substring("TSNET_NET=".length());
+            lastNetState = ns.length() > 100 ? ns.substring(0, 100) : ns;
+            lastNetAt = System.currentTimeMillis();
             changed = true;
         } else if (line.startsWith("TSNET_LOGIN_URL=")) {
             // 链接只进内存变量、只供卡面展示，绝不打日志、不进 /status。
@@ -1147,6 +1374,11 @@ public class TsnetNode {
         loginUrl = "";
         loginStatus = "";
         stopProcessOnly();
+        // v4.21：关节点即停心跳（线程下次醒来见开关已关即退出）。
+        if (heartbeatThread != null) {
+            try { heartbeatThread.interrupt(); } catch (Exception ignored) {}
+            heartbeatThread = null;
+        }
         // 用户主动停：卡面立即清掉，不必等 500ms 预定刷新。
         notifyListeners();
     }

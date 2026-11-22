@@ -1,3 +1,25 @@
+## v4.32（2026-11-21）
+简化重构 + Windows 版（用户 11-21 亲定"gsic 不用再内置智能体了，只需要作为你的手就行" + "Windows 平台作为 exe 程序运行"）：
+
+**Android 版简化（v4.22→v4.32）：**
+- 删除内置智能体：AgentLoop 自主决策循环、LlmClient/LlmStore/AuxModelStore 模型调用、Thinker 推理、CognitionStore 认知库、Distiller 经验蒸馏、LearningLadder 学习梯子、TaskBook/TaskPlan 任务规划、SharedMemory/UserMemory/UserProfile/MasterDict 记忆画像、HistoryStore/ChatStore 对话历史、TgBot/TgStore Telegram 机器人、SedimentReport 每周沉淀、BehaviorLog/Telemetry 行为遥测、LoopDetector 防环、AskGate 提问门等 27 个文件（约 9000 行）全部删除
+- GSIC 从"智能体+手"简化为纯"手"：远控执行器，不再有内置 LLM 决策、自主循环、记忆、Telegram；Muse（云端）是大脑，GSIC 只是执行手
+- 技能卡保留：SkillCardStore/SkillStore 不删，技能卡是 GSIC 存储的资源、供云端 Muse 按需调用，远控 /task 支持 use_card 步骤
+- TaskRunner 简化为纯步骤执行器：接收步骤 JSON 按顺序执行 tap/swipe/input/shell/screenshot/use_card 等，不做任何决策、不调 LLM
+- AgentHttpServer 的 /task 只接受 steps 模式，goal 模式删除
+- MainActivity 简化：去掉对话界面、智能体 tab，只留状态显示、远控设置、技能卡管理、关于页（8317 行→5406 行，净删 2911 行）
+- 四大地基保留：流光彩条、热更新、自更新、自启动全部保留
+- 文件数：82 → 56 个 Java 文件
+
+**Windows 版新增（x64）：**
+- 独立 exe 程序（Go 编写），运行在 Windows 10/11 x64 上
+- 与 Android 版同定位：Muse 的手，只执行不决策
+- 提供 HTTP 服务（28789 端口），与 Android 版共享远控协议
+- 功能：鼠标控制（移动/点击/拖拽/滚轮）、键盘控制（按键/输入/组合键）、截图、命令执行（cmd/PowerShell）、窗口管理、文件操作、剪贴板读写、技能卡存储与执行
+- 文件：gsic-4.32-windows-x64.exe（约 6MB，单文件零依赖）
+
+验证：全树 javac、aapt 与验签通过；Windows 版冒烟测试 17/17 通过。只构建不装机，待用户拍板。
+
 ## v3.66（2026-10-24）
 用户协议硬门+每周沉淀总结到仓库反馈：首次启动不可取消协议，须共享算力、每周提交一次使用体验沉淀总结到仓库反馈（GitHub Issues），由授权AI办理，提醒仅首次一次，不同意无法使用，三端均拦截；核心注入内部提示词与远控首次握手，界面不展示具体内容；每周沉淀总结为脱敏聚合版，远控端点提供总结、到期提醒一次、AI上传后回执记账。只构建不装机，待装机核销协议门与首次远控握手。
 

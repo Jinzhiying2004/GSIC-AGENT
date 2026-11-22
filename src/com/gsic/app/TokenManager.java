@@ -29,6 +29,9 @@ public class TokenManager {
     private final Context ctx;
     private final SecurePrefs sp;
 
+    /** Keystore 加密失败时仅内存有效的 token（未持久化，重启失效，Issue #1） */
+    private String memoryToken;
+
     public TokenManager(Context ctx) {
         this.ctx = ctx.getApplicationContext();
         this.sp = new SecurePrefs(this.ctx, PREF);
@@ -37,6 +40,8 @@ public class TokenManager {
     /** 获取当前有效 token（自动处理过期轮换和设备变更） */
     public synchronized String getToken() {
         String token = sp.getSecure(KEY_TOKEN, null);
+        // 解密失败返回空串，视同无 token，重新生成（Issue #1）
+        if (token != null && token.isEmpty()) token = null;
         long tokenTime = sp.getLong(KEY_TOKEN_TIME, 0);
         String tokenDevice = sp.getString(KEY_TOKEN_DEVICE, null);
         String curDevice = getDeviceId();
@@ -44,6 +49,7 @@ public class TokenManager {
         // 设备变了 → 失效重发
         if (token != null && tokenDevice != null && !tokenDevice.equals(curDevice)) {
             token = null;
+            memoryToken = null;
         }
 
         // 过期检查
@@ -52,23 +58,38 @@ public class TokenManager {
             long ageMs = System.currentTimeMillis() - tokenTime;
             if (ageMs > (long) expiryDays * 24 * 3600 * 1000) {
                 token = null; // 过期，重新生成
+                memoryToken = null;
             }
         }
 
         if (token == null) {
-            token = generateToken();
-            sp.putSecure(KEY_TOKEN, token);
-            sp.putLong(KEY_TOKEN_TIME, System.currentTimeMillis());
-            sp.putString(KEY_TOKEN_DEVICE, curDevice);
+            // 内存里有上次加密失败留下的 token 时先复用（Keystore 可能已恢复），
+            // 否则生成新的；加密仍失败则只留内存、绝不明文落盘
+            token = memoryToken != null ? memoryToken : generateToken();
+            if (sp.putSecure(KEY_TOKEN, token)) {
+                memoryToken = null;
+                sp.putLong(KEY_TOKEN_TIME, System.currentTimeMillis());
+                sp.putString(KEY_TOKEN_DEVICE, curDevice);
+            } else {
+                memoryToken = token;
+                android.util.Log.e("TokenManager",
+                        "Keystore 加密失败，token 未持久化（仅内存有效，重启后变更）");
+            }
         }
         return token;
     }
 
     /** 一键吊销：清除 token，下次 getToken() 会重新生成 */
     public synchronized void revoke() {
+        memoryToken = null;
         sp.remove(KEY_TOKEN);
         sp.remove(KEY_TOKEN_TIME);
         sp.remove(KEY_TOKEN_DEVICE);
+    }
+
+    /** Keystore 是否处于降级状态（token 仅内存有效，未加密持久化，Issue #1） */
+    public synchronized boolean isKeystoreDegraded() {
+        return memoryToken != null;
     }
 
     /** 手动轮换：立即生成新 token */

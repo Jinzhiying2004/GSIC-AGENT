@@ -282,16 +282,10 @@ public class FloatWindow {
             wm.addView(floatView, params);
             lastShowError = "";
         } catch (Exception e) {
-            // v3.51：不再静默吞——落日志+遥测，看门狗会按登记状态重试补窗
+            // v3.51：不再静默吞——落日志，看门狗会按登记状态重试补窗
             floatView = null;
             lastShowError = String.valueOf(e);
             android.util.Log.e("FloatWindow", "show failed", e);
-            try {
-                org.json.JSONObject d = new org.json.JSONObject();
-                d.put("err", lastShowError);
-                Telemetry.event(ac, "float", "show_fail", d);
-            } catch (Exception ignored2) {
-            }
         }
     }
 

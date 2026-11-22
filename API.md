@@ -2,7 +2,8 @@
 
 App 内置 HTTP 服务，端口 **28789**（v2.41 起默认端口由 18789 改为 28789，
 可在 App「远控」页修改，1024–65535），所有接口需 token 鉴权：
-`?token=xxx` 或 Header `X-Token: xxx`。token 在 App「远控」页可见，
+请求头 `X-Token: xxx`（Issue #1 起不再接受 `?token=` 查询参数）。
+token 在 App「远控」页可见，
 可一键复制连接信息发给云端。
 
 安全：v2.42 起服务加来源 IP 白名单，只放行本机回环与 Tailscale 网段
@@ -13,21 +14,21 @@ App 内置 HTTP 服务，端口 **28789**（v2.41 起默认端口由 18789 改�
 
 ### GET /status
 ```bash
-curl "http://手机IP:28789/status?token=xxx"
+curl -H "X-Token: xxx" "http://手机IP:28789/status"
 # {"ok":true,"version":2,"accessibility":true,"service":true}
 ```
 
 ### GET /screen — 读屏（剪枝后的结构化节点，零截图）
 ```bash
-curl "http://手机IP:28789/screen?token=xxx"
+curl -H "X-Token: xxx" "http://手机IP:28789/screen"
 # {"ok":true,"nodes":[{"text":"设置","desc":"","clickable":true,"cx":540,"cy":200}, ...]}
 ```
 
 ### GET /screenshot — 截屏（无障碍优先，root 兜底）
 ```bash
-curl "http://手机IP:28789/screenshot?token=xxx"
+curl -H "X-Token: xxx" "http://手机IP:28789/screenshot"
 # {"ok":true,"via":"accessibility","png":"<base64>"}
-curl "http://手机IP:28789/screenshot?token=xxx&compact=1"
+curl -H "X-Token: xxx" "http://手机IP:28789/screenshot?compact=1"
 # {"ok":true,"via":"accessibility","compact":true,"jpg":"<base64>"}
 # compact=1：降到 720p + JPEG 压缩，给 LLM 看屏省 token/流量
 ```
@@ -41,7 +42,7 @@ App「智能体」页「🛡 动作审批」可设每级的策略：自动允许
 
 ### POST /action — 单步执行（do 与任务步骤同名）
 ```bash
-curl -X POST "http://手机IP:28789/action?token=xxx" \
+curl -X POST "http://手机IP:28789/action" -H "X-Token: xxx" \
   -H "Content-Type: application/json" \
   -d '{"do":"tap_text","text":"显示"}'
 # {"ok":true,"log":[...]}
@@ -58,7 +59,7 @@ read_file / write_file / fetch_url / screenshot / use_card（跑技能卡）/ sk
 
 ### POST /task — 执行完整任务 JSON
 ```bash
-curl -X POST "http://手机IP:28789/task?token=xxx" \
+curl -X POST "http://手机IP:28789/task" -H "X-Token: xxx" \
   -H "Content-Type: application/json" \
   -d @tasks/example_settings.json
 # {"ok":true,"log":[...]}
@@ -66,7 +67,7 @@ curl -X POST "http://手机IP:28789/task?token=xxx" \
 
 #### 🎯 目标式任务（v2.45+；v2.47 起默认异步）
 ```bash
-curl -X POST "http://手机IP:28789/task?token=xxx" \
+curl -X POST "http://手机IP:28789/task" -H "X-Token: xxx" \
   -H "Content-Type: application/json" \
   -d '{"goal":"打开汽水音乐领免费听歌时长","maxSteps":30}'
 # {"ok":true,"started":true,"taskId":"..."}
@@ -82,7 +83,7 @@ curl -X POST "http://手机IP:28789/task?token=xxx" \
 
 ### GET /task/status — 远控任务实时进度（v2.47+）
 ```bash
-curl "http://手机IP:28789/task/status?taskId=xxx&token=xxx"
+curl -H "X-Token: xxx" "http://手机IP:28789/task/status?taskId=xxx"
 # {"ok":true,"taskId":"rt-1-23456","goal":"...","maxSteps":30,
 #  "done":false,"resultOk":false,"step":3,"think":"...",
 #  "elapsedSec":42,"log":[...最近25条...],"audit":[...]}
@@ -92,7 +93,7 @@ curl "http://手机IP:28789/task/status?taskId=xxx&token=xxx"
 
 ### POST /patch — 热补丁推送（v2.44+）
 ```bash
-curl -X POST "http://手机IP:28789/patch?token=xxx" \
+curl -X POST "http://手机IP:28789/patch" -H "X-Token: xxx" \
   -H "Content-Type: application/octet-stream" \
   --data-binary @patch-78-xxx.zip
 # {"ok":true,"tag":"xxx"}

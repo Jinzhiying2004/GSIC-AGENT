@@ -28,39 +28,12 @@ public class AgentService extends Service {
 
     private static volatile boolean running = false;
 
-    // v3.05：TgBot 搬到 Service 里，后台真运行
-    private TgBot tgBot;
-    private static volatile boolean tgRunning = false;
-
-    public static boolean isTgRunning() {
-        return tgRunning;
-    }
-
     // v3.05：静态控制 TG（供 MainActivity 调用）
     private static AgentService instance = null;
     // v4.18 锁屏章鱼待机：服务内登记亮屏/灭屏/解锁广播——锁屏亮屏
     // 时挂黑屏章鱼，灭屏或解锁即收起（USER_PRESENT 是系统在解锁
     // 成功后发的广播，不用 GSIC 自己猜锁屏状态）。
     private android.content.BroadcastReceiver lockStandbyReceiver;
-
-    public static void startTgStatic(Context ctx) {
-        if (instance != null) {
-            instance.startTgBot();
-        } else {
-            // Service 未运行，先拉起服务（onCreate 会自动启 TG）
-            Intent i = new Intent(ctx, AgentService.class);
-            if (Build.VERSION.SDK_INT >= 26) {
-                ctx.startForegroundService(i);
-            } else {
-                ctx.startService(i);
-            }
-        }
-    }
-
-    public static void stopTgStatic() {
-        if (instance != null) instance.stopTgBot();
-        tgRunning = false;
-    }
 
     public static boolean isRunning() {
         return running;
@@ -69,6 +42,10 @@ public class AgentService extends Service {
     private AgentHttpServer http;
     private PetController pet;
     private android.os.Handler schedHandler;
+    // v4.22：6 小时本体定时重启——服务启动时间戳，schedTick 每分钟
+    // 检查一次，满 6 小时且无任务在跑时重启进程（root 看门狗拉回）。
+    private long serviceStartAt = 0;
+    private static final long RESTART_INTERVAL_MS = 6L * 3600_000L;
 
     private final Runnable schedTick = new Runnable() {
         @Override
@@ -77,14 +54,60 @@ public class AgentService extends Service {
                 runDueSchedules();
             } catch (Exception ignored) {
             }
+            try {
+                maybeRestartApp();
+            } catch (Exception ignored) {
+            }
             if (schedHandler != null) schedHandler.postDelayed(this, 60_000);
         }
     };
 
+    /** v4.22：6 小时定时重启——满 6 小时且无任务在跑时重启本体。
+     * 有任务在跑时跳过本轮，下分钟再查（任务结束才重启，不中断任务）。 */
+    private void maybeRestartApp() {
+        if (serviceStartAt <= 0) return;
+        long uptime = System.currentTimeMillis() - serviceStartAt;
+        if (uptime < RESTART_INTERVAL_MS) return;
+        if (FloatWindow.isTaskActive()) return;
+        restartApp();
+    }
+
+    /** v4.22：本体重启——记日志、停 tsnet/CF、停服务、2 秒后杀进程。
+     * 进程死后由 Magisk root 看门狗（60 秒巡检）+ START_STICKY 拉回服务。 */
+    private void restartApp() {
+        try {
+            long now = System.currentTimeMillis();
+            getSharedPreferences("agent", MODE_PRIVATE)
+                    .edit().putLong("last_auto_restart_at", now).apply();
+            android.util.Log.i("AgentService",
+                    "6 小时定时重启：uptime=" + (now - serviceStartAt) + "ms");
+        } catch (Exception ignored) {
+        }
+        try {
+            TsnetNode.stopProcessOnly();
+        } catch (Exception ignored) {
+        }
+        try {
+            CloudflareTunnel.stopProcessOnly();
+        } catch (Exception ignored) {
+        }
+        try {
+            stopSelf();
+        } catch (Exception ignored) {
+        }
+        try {
+            new android.os.Handler(android.os.Looper.getMainLooper())
+                    .postDelayed(() -> {
+                        android.os.Process.killProcess(
+                                android.os.Process.myPid());
+                    }, 2000);
+        } catch (Exception ignored) {
+        }
+    }
+
     /** 本地定时任务：每天 / 每间隔执行技能，零 token */
     private void runDueSchedules() {
         ScheduleStore store = new ScheduleStore(this);
-        HistoryStore hist = new HistoryStore(this);
         SkillStore skills = new SkillStore(this);
         long now = System.currentTimeMillis();
         for (ScheduleStore.Schedule sc : store.due(now)) {
@@ -103,7 +126,6 @@ public class AgentService extends Service {
                 });
                 ok = r.run(json);
             }
-            hist.append(name + "（定时）", ok);
             store.touch(sc.id, now);
         }
     }
@@ -112,6 +134,8 @@ public class AgentService extends Service {
     public void onCreate() {
         super.onCreate();
         instance = this;
+        // v4.22：6 小时定时重启计时起点（服务每次启动重置）
+        serviceStartAt = System.currentTimeMillis();
         // v3.52：开机自启回执确认（有待确认的开机广播则落 boot_ok_ts）
         BootReceiver.noteServiceUp(this);
         // 地基·自更新：装后自验对账 + 启动静默检查（24h 节流、只记不扰）
@@ -131,10 +155,8 @@ public class AgentService extends Service {
                 ? new Notification.Builder(this, chId)
                 : new Notification.Builder(this);
         int port = getPort(this);
-        // v3.05：通知栏显示 TG 状态
-        String tgState = tgRunning ? " · TG机器人运行中" : "";
         Notification n = nb.setContentTitle("GSIC")
-                .setContentText("远程控制服务运行中（端口 " + port + "）" + tgState)
+                .setContentText("远程控制服务运行中（端口 " + port + "）")
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .build();
         startForeground(1, n);
@@ -148,8 +170,6 @@ public class AgentService extends Service {
             // v3.42 常驻三层：闹钟看门狗 + Magisk root 守护（开机自启在 BootReceiver）
             scheduleWatchdog();
             installRootWatchdog();
-            // v3.05：TG 机器人随服务自启（后台真运行）
-            tryStartTgBot();
             // v3.91：启动优先级——内置节点优先；只有内置没开时，CF 隧道才按开关恢复。
             // （手动启动 CF 不受影响；运行中内置断了再起 CF 属于运行时 fallback，另算。）
             try {
@@ -264,44 +284,6 @@ public class AgentService extends Service {
         }
     }
 
-    /** v3.05：尝试启动 TG 机器人（有 token 且开启自启） */
-    private void tryStartTgBot() {
-        try {
-            boolean auto = getSharedPreferences("agent", MODE_PRIVATE)
-                    .getBoolean("tg_autostart", true);
-            TgStore tgStore = new TgStore(this);
-            if (auto && tgStore.hasToken()) {
-                startTgBot();
-            }
-        } catch (Exception ignored) {
-        }
-    }
-
-    /** v3.05：启动 TG（可被 MainActivity 调用） */
-    public void startTgBot() {
-        try {
-            if (tgBot == null) {
-                TgStore tgStore = new TgStore(this);
-                LlmStore llmStore = new LlmStore(this);
-                tgBot = new TgBot(this, tgStore, llmStore,
-                        msg -> android.util.Log.i("TgBot", msg));
-            }
-            tgBot.start();
-            tgRunning = true;
-        } catch (Exception e) {
-            android.util.Log.e("AgentService", "TG 启动失败: " + e.getMessage());
-        }
-    }
-
-    /** v3.05：停止 TG（可被 MainActivity 调用） */
-    public void stopTgBot() {
-        try {
-            if (tgBot != null) tgBot.stop();
-            tgRunning = false;
-        } catch (Exception ignored) {
-        }
-    }
-
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         return START_STICKY;
@@ -354,8 +336,6 @@ public class AgentService extends Service {
         } catch (Exception ignored) {
         }
         if (pet != null) pet.stop();
-        // v3.05：服务销毁时停 TG
-        stopTgBot();
         instance = null;
         if (schedHandler != null) schedHandler.removeCallbacks(schedTick);
         if (http != null) http.stop();

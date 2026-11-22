@@ -17,8 +17,19 @@ public class SecurePrefs {
                 .getSharedPreferences(name, Context.MODE_PRIVATE);
     }
 
-    public void putSecure(String key, String value) {
-        sp.edit().putString(key, CryptoUtil.encrypt(value)).apply();
+    /**
+     * 加密保存敏感字符串；加密失败时不写入任何内容并返回 false
+     *（Issue #1：拒绝明文降级）。调用方据此决定是否用内存态兜底。
+     */
+    public boolean putSecure(String key, String value) {
+        try {
+            String enc = CryptoUtil.encrypt(value);
+            sp.edit().putString(key, enc).apply();
+            return true;
+        } catch (Exception e) {
+            android.util.Log.e("SecurePrefs", "putSecure 加密失败，拒绝保存：" + key, e);
+            return false;
+        }
     }
 
     public String getSecure(String key, String def) {

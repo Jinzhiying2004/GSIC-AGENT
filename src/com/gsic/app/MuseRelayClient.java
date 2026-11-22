@@ -20,12 +20,15 @@ import org.json.JSONObject;
  * 协议（与 ~/workspace/muse-relay-server.py 对齐）：
  *   GET  {relay}/poll?token=...   长轮询 30 秒，无命令回 {"command":null}
  *   POST {relay}/result           {"id":..., "ok":..., "result":...}
- *   命令：{"id":..., "type":"ping"|"status"|"task", "goal":..., "maxSteps":30}
+ *   命令：{"id":..., "type":"ping"|"status"|"task"|"action"}
+ *     task：{"task":{...steps 任务 JSON...}} 或 {"steps":[...]}（v4.23 起
+ *       只接受 steps，goal 模式已随手机端智能体一并移除）
+ *     action：{"step":{...单步 JSON...}}
  * 安全：token 只存 GSIC 本地 prefs（relay），只发往用户填的中继地址；
  * 中继地址生产上必须是 https，http 仅限局域网测试，UI 里已写明；
  * 命令可操控手机，中继必须带 token 鉴权，无 token 不启动。
- * 任务执行复用 TgBot 同款 AgentLoop 路径（setRemote(true)、
- * setChannel("relay")、TaskLock("relay") 三通道互斥），不是另起一套。
+ * 任务执行走 TaskRunner（setRemote(true)、setChannel("relay")、
+ * TaskLock("relay") 三通道互斥），与 /task steps 模式同一条执行路径。
  * 本版不做 WebSocket（Android 纯 Java 无内置 WebSocket 客户端，
  * 不引第三方库），长轮询 30 秒已够命令下发，断线后 3 秒重连。
  * 调用方必须在后台线程调用 start()/stop()，状态经 Listener 回 UI。
@@ -151,10 +154,24 @@ public class MuseRelayClient {
                 return;
             }
             if (type.equals("task")) {
-                String goal = cmd.optString("goal", "");
-                int maxSteps = cmd.optInt("maxSteps", 30);
-                if (goal.isEmpty()) {
-                    postResult(base, token, id, false, "goal 为空");
+                // v4.23：只接受 steps 任务；goal 模式已移除，明确报错不静默失败
+                if (cmd.has("goal") && !cmd.has("task") && !cmd.has("steps")) {
+                    postResult(base, token, id, false,
+                            "goal 模式已移除，请发送 steps 任务（task 字段）");
+                    return;
+                }
+                String taskJson = null;
+                try {
+                    if (cmd.has("task")) {
+                        taskJson = cmd.getJSONObject("task").toString();
+                    } else if (cmd.has("steps")) {
+                        taskJson = new JSONObject()
+                                .put("steps", cmd.getJSONArray("steps")).toString();
+                    }
+                } catch (Exception ignored) {
+                }
+                if (taskJson == null || taskJson.isEmpty()) {
+                    postResult(base, token, id, false, "task/steps 为空");
                     return;
                 }
                 if (!TaskLock.tryAcquire("relay")) {
@@ -164,29 +181,38 @@ public class MuseRelayClient {
                 final String fBase = base;
                 final String fToken = token;
                 final String fId = id;
+                final String fTaskJson = taskJson;
                 new Thread(() -> {
                     StringBuilder logs = new StringBuilder();
                     try {
-                        LlmStore llmStore = new LlmStore(ctx);
-                        if (!llmStore.hasKey()) {
-                            postResult(fBase, fToken, fId, false, "先在 App 大模型配置里填好 API Key");
-                            return;
+                        TaskRunner r = new TaskRunner(ctx,
+                                msg -> logs.append(msg).append("\n"));
+                        r.setRemote(true);
+                        r.setChannel("relay");
+                        try {
+                            String rp = ctx.getSharedPreferences("agent",
+                                    Context.MODE_PRIVATE)
+                                    .getString("remote_risk_policy", "deny");
+                            r.setRemoteRiskPolicy(rp);
+                        } catch (Exception ignored) {
                         }
-                        AgentLoop loop = new AgentLoop(ctx, llmStore.client(),
-                                new AgentLoop.Listener() {
-                                    @Override
-                                    public void onLog(String msg) {
-                                        logs.append(msg).append("\n");
-                                    }
-
-                                    @Override
-                                    public boolean isStopped() {
-                                        return !running;
-                                    }
-                                });
-                        loop.setRemote(true);
-                        loop.setChannel("relay");
-                        boolean ok = loop.run(goal, maxSteps);
+                        // 中继停止时停掉正在跑的任务（原 AgentLoop.isStopped 回调的替代）
+                        final boolean[] finished = {false};
+                        new Thread(() -> {
+                            while (!finished[0]) {
+                                if (!running) {
+                                    r.stop();
+                                    break;
+                                }
+                                try {
+                                    Thread.sleep(500);
+                                } catch (InterruptedException e) {
+                                    break;
+                                }
+                            }
+                        }, "relay-task-watch").start();
+                        boolean ok = r.run(fTaskJson);
+                        finished[0] = true;
                         String tail = logs.toString();
                         if (tail.length() > 4000) tail = tail.substring(tail.length() - 4000);
                         postResult(fBase, fToken, fId, ok, tail);
@@ -196,6 +222,42 @@ public class MuseRelayClient {
                         TaskLock.release("relay");
                     }
                 }, "relay-task").start();
+                return;
+            }
+            if (type.equals("action")) {
+                // v4.23：单步执行，与 /action 对应
+                String stepJson = null;
+                try {
+                    if (cmd.has("step")) stepJson = cmd.getJSONObject("step").toString();
+                } catch (Exception ignored) {
+                }
+                if (stepJson == null || stepJson.isEmpty()) {
+                    postResult(base, token, id, false, "step 为空");
+                    return;
+                }
+                if (!TaskLock.tryAcquire("relay")) {
+                    postResult(base, token, id, false, "任务忙：" + TaskLock.current() + " 通道正在执行");
+                    return;
+                }
+                final String fStepJson = stepJson;
+                final String fBase2 = base;
+                final String fToken2 = token;
+                final String fId2 = id;
+                new Thread(() -> {
+                    StringBuilder logs = new StringBuilder();
+                    try {
+                        TaskRunner r = new TaskRunner(ctx,
+                                msg -> logs.append(msg).append("\n"));
+                        r.setRemote(true);
+                        r.setChannel("relay");
+                        boolean ok = r.execOneStep(fStepJson);
+                        postResult(fBase2, fToken2, fId2, ok, logs.toString());
+                    } catch (Exception e) {
+                        postResult(fBase2, fToken2, fId2, false, "执行异常：" + e.getMessage());
+                    } finally {
+                        TaskLock.release("relay");
+                    }
+                }, "relay-action").start();
                 return;
             }
             postResult(base, token, id, false, "未知命令类型：" + type);

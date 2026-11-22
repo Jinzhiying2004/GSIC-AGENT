@@ -12,7 +12,7 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.util.List;
 
-/** 任务执行器：解析 JSON 任务并本地执行。运行期零 token、零联网。 */
+/** 纯步骤执行器：按顺序执行 JSON 步骤列表，决策在云端 Muse。运行期零 token、零联网。 */
 public class TaskRunner {
 
     public interface Listener {
@@ -34,7 +34,7 @@ public class TaskRunner {
     private String lastOutput = "";
     private Approver approver = null;
     private boolean remote = false;
-    // 学习梯子步骤2：任务通道（见 setChannel）
+    // 任务通道（见 setChannel）
     private String channel = "";
     private ActionRisk.Policy riskPolicy = null;
     // v3.10 Issue 4：远程高危动作策略（deny=一律拒绝，allow_log=允许但记录）
@@ -42,19 +42,15 @@ public class TaskRunner {
     // v3.14：虚拟屏模式——主屏动作透明路由到 vd_*，用户主屏不受打扰
     private boolean vdMode = false;
 
-    // 学习梯子步骤1：每任务独立的爬梯记账（联网搜索 2 轮硬上限 + 问用户状态）
-    // TaskRunner 按任务构造（AgentLoop/TgBot/ApiHandler 每次任务 new 一个），
-    // 故实例字段即等于每任务预算。
-    private final LearningLadder ladder = new LearningLadder();
-
-    // 记忆分层步骤 4：认知库（图标词典注入用），由 AgentLoop.setCognitionStore 传入
-    private CognitionStore cogStore = null;
-    public void setCognitionStore(CognitionStore c) { cogStore = c; }
+    // 每任务本地预算（TaskRunner 按任务构造，实例字段即等于每任务预算）：
+    // 联网搜索上限 2 轮，问用户上限 1 次。
+    private int searchUsed = 0;
+    private boolean askedOnce = false;
 
     // 前台包名缓存（10s TTL；取不到时返回空串，只出通用图标义）
     private long fgPkgTs = 0;
     private String fgPkgCache = "";
-    /** v3.51 步骤5：遥测 step_env 的 fg_app 字段——复用 10s TTL 缓存，零额外开销 */
+    /** 前台包名（present_to_user 交回主屏时用；复用 10s TTL 缓存，零额外开销） */
     public String fgPackage() { return foregroundPkgCached(); }
     private String foregroundPkgCached() {
         long now = System.currentTimeMillis();
@@ -98,11 +94,10 @@ public class TaskRunner {
     }
 
     /**
-     * 学习梯子步骤2：设置任务通道（app/tg/remote）。
-     * ask_user 按通道选提问方式：app 走悬浮窗，tg 走同步提问，
+     * 设置任务通道（app/remote）。
+     * ask_user 按通道选提问方式：app 走悬浮窗，
      * remote（HTTP 远控）无聊天回路只能结论降级。
-     * AgentLoop 会同步 PhoneTools.sessionChannel；直接 new TaskRunner 的
-     * 路径（如 TgBot /task）由调用方显式 setChannel。
+     * 由调用方显式 setChannel，未设置按本地处理。
      */
     public void setChannel(String ch) {
         this.channel = ch == null ? "" : ch;
@@ -113,7 +108,7 @@ public class TaskRunner {
         this.remoteRiskPolicy = policy;
     }
 
-    /** v3.14：设置虚拟屏模式（AgentLoop 在任务开始时根据配置调用） */
+    /** v3.14：设置虚拟屏模式（调用方在任务开始时根据配置调用） */
     public void setVdMode(boolean vdMode) {
         this.vdMode = vdMode;
     }
@@ -173,173 +168,23 @@ public class TaskRunner {
                 return o;
             }
             case "tap_text": {
-                return vdTapText(st.optString("text", ""));
+                // 虚拟屏无无障碍节点树、手机端不再调视觉模型：
+                // 云端请用 /screenshot?vd=1 看图后改发带坐标的 vd_tap
+                log("虚拟屏 tap_text 已移除视觉定位，请改发带坐标的 vd_tap");
+                return null;
             }
             default:
                 return st;
         }
     }
 
-    /** v3.14：虚拟屏 tap_text——视觉问坐标再 vd_tap */
-    private JSONObject vdTapText(String text) throws Exception {
-        if (text.isEmpty()) {
-            log("tap_text 缺少 text 参数");
-            return null;
-        }
-        android.graphics.Bitmap bmp = VirtualDisplayManager.screenshot();
-        if (bmp == null) {
-            log("虚拟屏截屏失败，无法定位文字");
-            return null;
-        }
-        log("虚拟屏找字: " + text);
-        // v3.21：归一化定位（0-1000），避免模型直接估算像素的缩放误差
-        int[] xy = visionLocate(text, bmp);
-        if (xy == null) {
-            log("虚拟屏定位失败: " + text);
-            return null;
-        }
-        JSONObject o = new JSONObject();
-        o.put("do", "vd_tap");
-        o.put("x", xy[0]);
-        o.put("y", xy[1]);
-        return o;
-    }
-
-    /**
-     * v3.21：归一化视觉定位。让模型以 0-1000 归一化坐标回答中心点，
-     * 再换算成像素。直接问像素坐标时模型常因缩放估算偏差点不中
-     * （如把 y=965 估成 1030，小按钮就点空）。
-     * 返回 {x_px, y_px}，失败返回 null。
-     */
-    private int[] visionLocate(String text,
-                               android.graphics.Bitmap bmp) {
-        String q = "找出界面上文字为「" + text + "」的可点击元素，"
-                + "以 0-1000 归一化坐标回答它的中心点"
-                + "（左上角为 (0,0)，右下角为 (1000,1000)），"
-                + "只回答 JSON {\"x\": 数字, \"y\": 数字}，不要解释。";
-        String ans = visionAsk(q, bmp);
-        java.util.regex.Matcher m = java.util.regex.Pattern
-                .compile("\"x\"\\s*:\\s*(\\d+)[^0-9\"']*\"y\"\\s*:\\s*(\\d+)")
-                .matcher(ans);
-        if (!m.find()) {
-            // 兼容模型返回 (x, y) 格式
-            m = java.util.regex.Pattern
-                    .compile("\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*\\)")
-                    .matcher(ans);
-            if (!m.find()) return null;
-        }
-        int nx = Integer.parseInt(m.group(1));
-        int ny = Integer.parseInt(m.group(2));
-        int w = bmp.getWidth(), h = bmp.getHeight();
-        // 归一化转像素；任一值>1000 说明模型直接给了像素，整体按像素钳制
-        int px, py;
-        if (nx <= 1000 && ny <= 1000) {
-            px = nx * w / 1000;
-            py = ny * h / 1000;
-        } else {
-            px = Math.min(nx, w - 1);
-            py = Math.min(ny, h - 1);
-        }
-        log("虚拟屏定位 " + text + ": 归一化(" + nx + "," + ny
-                + ") → 像素(" + px + "," + py + ")");
-        return new int[]{px, py};
-    }
-
-    /** v3.14：虚拟屏 wait_text——轮询视觉判断（最多 6 次，间隔 3 秒） */
-    private boolean vdWaitText(String kw, int timeoutSec) {
-        log("虚拟屏等待文本: " + kw);
-        long end = System.currentTimeMillis() + timeoutSec * 1000L;
-        int polls = 0;
-        while (System.currentTimeMillis() < end && polls < 6) {
-            polls++;
-            android.graphics.Bitmap bmp = VirtualDisplayManager.screenshot();
-            if (bmp != null) {
-                String ans = visionAsk(
-                        "界面上是否出现了文字「" + kw + "」？只回答 yes 或 no。",
-                        bmp);
-                if (ans.trim().toLowerCase().startsWith("yes")) {
-                    log("虚拟屏等到文本: " + kw);
-                    return true;
-                }
-            }
-            try {
-                Thread.sleep(3000);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return false;
-            }
-        }
-        log("虚拟屏等待超时: " + kw);
-        return false;
-    }
-
-    /** v3.14：虚拟屏 assert_text——单次视觉判断 */
-    private boolean vdAssertText(String kw) {
-        android.graphics.Bitmap bmp = VirtualDisplayManager.screenshot();
-        if (bmp == null) return false;
-        String ans = visionAsk(
-                "界面上是否出现了文字「" + kw + "」？只回答 yes 或 no。", bmp);
-        boolean ok = ans.trim().toLowerCase().startsWith("yes");
-        log("虚拟屏断言 " + kw + ": " + (ok ? "通过" : "失败"));
-        return ok;
-    }
-
-    /**
-     * v3.14：虚拟屏视觉问答（复用 vision 动作的模型优先级：
-     * 辅助视觉模型 > 主力视觉模型 > 主力模型）。
-     * v3.17：辅助模型调用失败时自动降级用主力模型（baseUrl 配错等场景）。
-     */
-    private String visionAsk(String question,
-                             android.graphics.Bitmap bmp) {
-        // v3.21：统一要求归一化坐标，避免像素估算偏差
-        String q = question + "\n\n（如需回答位置，请用 0-1000 归一化坐标，"
-                + "左上角为原点；不要估算像素值。）";
-        // 记忆分层步骤 4：图标词典注入（通用义 + 前台 App 界面地图覆盖）
-        try {
-            if (cogStore != null) {
-                String ib = cogStore.iconBlock(foregroundPkgCached());
-                if (!ib.isEmpty()) q = q + "\n\n" + ib;
-            }
-        } catch (Exception ignored) {
-        }
-        // 1) 辅助视觉模型
-        try {
-            AuxModelStore aux = new AuxModelStore(ctx);
-            AuxModelStore.AuxModel vm = aux.getVisionModel();
-            if (vm != null && !vm.apiKey.isEmpty() && !vm.baseUrl.isEmpty()) {
-                LlmClient vc = new LlmClient(vm.baseUrl, vm.apiKey, vm.model);
-                LlmClient.Result vr = vc.chatVision(q, bmp, vm.model);
-                if (vr.ok) return vr.text;
-                log("辅助视觉模型失败，降级用主力模型: "
-                        + truncate(vr.text, 60));
-            }
-        } catch (Exception e) {
-            log("辅助视觉模型异常，降级用主力模型");
-        }
-        // 2) 主力模型兜底
-        try {
-            LlmStore ls = new LlmStore(ctx);
-            if (!ls.hasKey()) {
-                log("虚拟屏视觉：未配置模型");
-                return "";
-            }
-            String vBase = ls.getBaseUrl();
-            String vKey = ls.getApiKeyRaw();
-            String vModel = ls.getVisionModel();
-            if (vModel.isEmpty()) vModel = ls.getModel();
-            LlmClient vc = new LlmClient(vBase, vKey, vModel);
-            LlmClient.Result vr = vc.chatVision(q, bmp, vModel);
-            return vr.ok ? vr.text : "";
-        } catch (Exception e) {
-            return "";
-        }
-    }
+    /** v3.14：虚拟屏 wait_text/assert_text/tap_text 的视觉判断已随模型调用一起移除（见 runStep 虚拟屏分支）。 */
 
     public void setRiskPolicy(ActionRisk.Policy policy) {
         if (policy != null) this.riskPolicy = policy;
     }
 
-    /** 上一步动作的输出（shell/读文件/抓网页用，agent 回传给大脑） */
+    /** 上一步动作的输出（shell/读文件/抓网页用，调用方读取） */
     public String getLastOutput() {
         return lastOutput;
     }
@@ -606,7 +451,7 @@ public class TaskRunner {
 
     public boolean run(String taskJson) {
         // v3.62：地基①补登记——steps 模式此前零 FloatWindow 调用，任务运行时无彩条；
-        // 与 AgentLoop v3.51 同模式：run 开头 begin、finally end（引用计数支持嵌套登记）。
+        // run 开头 begin、finally end（引用计数支持嵌套登记）。
         String name = "steps任务";
         try { name = new JSONObject(taskJson).optString("name", name); } catch (Exception ignored) {}
         FloatWindow.beginTask(ctx, "⚙️ " + name);
@@ -614,6 +459,32 @@ public class TaskRunner {
             JSONObject task = new JSONObject(taskJson);
             JSONObject params = task.optJSONObject("params");
             return runTask(task, params, 0);
+        } catch (Exception e) {
+            log("任务异常: " + e.getMessage());
+            return false;
+        } finally {
+            FloatWindow.endTask("");
+        }
+    }
+
+    /**
+     * 纯步骤执行器入口：按顺序执行步骤列表（云端 Muse 下发 steps 的直接入口，
+     * /task steps 模式与中继 task 命令均可调它）。
+     * 与 run(String) 同语义：流光彩条登记 + 步骤循环 + 可选步骤容错。
+     */
+    public boolean runSteps(java.util.List<JSONObject> steps) {
+        if (steps == null || steps.isEmpty()) {
+            log("runSteps：步骤列表为空");
+            return false;
+        }
+        FloatWindow.beginTask(ctx, "⚙️ steps任务");
+        try {
+            JSONObject task = new JSONObject();
+            task.put("name", "steps任务");
+            JSONArray arr = new JSONArray();
+            for (JSONObject s : steps) arr.put(s);
+            task.put("steps", arr);
+            return runTask(task, null, 0);
         } catch (Exception e) {
             log("任务异常: " + e.getMessage());
             return false;
@@ -756,14 +627,13 @@ public class TaskRunner {
 
     private boolean runStep(JSONObject st, JSONObject params, int depth) throws Exception {
         String do_ = st.getString("do");
-        // v3.14：虚拟屏模式——主屏动作透明改写为 vd_*（LLM 无需感知）
+        // v3.14：虚拟屏模式——主屏动作透明改写为 vd_*（调用方无需感知）
         if (vdMode && VirtualDisplayManager.isActive()) {
-            if ("wait_text".equals(do_)) {
-                return vdWaitText(st.optString("text", ""),
-                        st.optInt("timeout", 15));
-            }
-            if ("assert_text".equals(do_)) {
-                return vdAssertText(st.optString("text", ""));
+            if ("wait_text".equals(do_) || "assert_text".equals(do_)) {
+                // 虚拟屏无无障碍节点树、手机端不再调视觉模型：
+                // 云端请看 /screenshot?vd=1 自行判断，或改发带坐标的 vd_tap
+                log("虚拟屏下 " + do_ + " 已移除视觉判断，请云端看截图自行判断");
+                return false;
             }
             st = rewriteForVd(st);
             if (st == null) return false;
@@ -803,7 +673,7 @@ public class TaskRunner {
                 if (hit == null) {
                     log("超时未找到: " + kw
                             + "；提示：文本不在控件树时别猜坐标乱点，"
-                            + "用 vision 按截图问出坐标再 tap");
+                            + "用 /screenshot 看图后发带坐标的 tap");
                     return false;
                 }
                 // v2.90：有 root 则直接命令点坐标（最稳）
@@ -970,14 +840,15 @@ public class TaskRunner {
                 }
             }
             case "search": {
-                // 学习梯子第 2 级：每任务联网搜索上限 2 轮，无果不硬耗（SPEC 一）
-                if (ladder.searchBudgetLeft() <= 0) {
-                    lastOutput = "本任务已用完 2 轮搜索预算（学习梯子第 2 级上限）。"
-                            + "不要再调 search；下一步走梯子第 3 级：用 ask_user 把问题"
-                            + "（带候选选项）问用户，问完按用户选择做。";
+                // 每任务联网搜索上限 2 轮，无果不硬耗
+                if (searchUsed >= 2) {
+                    lastOutput = "本任务已用完 2 轮搜索预算，不要再调 search；"
+                            + "可改用 ask_user 把问题（带候选选项）问用户，"
+                            + "问完按用户选择做。";
                     log(lastOutput);
                     return false;
                 }
+                searchUsed++;
                 // 联网搜索（DuckDuckGo，无需 key），结果可存变量供后续步骤用
                 String query = st.getString("query");
                 int count = st.optInt("count", 5);
@@ -1053,19 +924,16 @@ public class TaskRunner {
                     String saveAs = st.optString("save_as", "");
                     if (!saveAs.isEmpty()) params.put(saveAs, lastOutput);
                     boolean found = !titles.isEmpty();
-                    ladder.recordSearch(found);
                     return found;
                 } catch (Exception e) {
-                    ladder.recordSearch(false);
                     log("搜索失败: " + e.getMessage());
                     return false;
                 }
             }
             case "ask_user": {
-                // 学习梯子第 3 级：两轮搜完无果，问用户一句（选项式）
-                // v4.16 少问：每任务最多问一次——已经问过的再调直接驳回，
-                // 让模型按最佳判断继续，不要反复弹框问用户。
-                if (ladder.hasAsked()) {
+                // 问用户一句（选项式）。每任务最多问一次——已经问过的再调
+                // 直接驳回，按最佳判断继续，不要反复弹框问用户。
+                if (askedOnce) {
                     lastOutput = "本任务已经问过用户一次，不要再问；"
                             + "按你自己的最佳判断继续，并在最终结论里说明"
                             + "你的假设和依据，不要把问题留给用户。";
@@ -1092,20 +960,13 @@ public class TaskRunner {
                     }
                 }
                 String hint = st.optString("hint", "").trim();
-                String[] opts = LearningLadder.capOptions(
+                String[] opts = capOptions(
                         optList.toArray(new String[0]));
-                String payload = LearningLadder.formatAsk(question, opts)
+                String payload = formatAsk(question, opts)
                         + (hint.isEmpty() ? "" : "\n补充说明：" + hint);
-                ladder.markAsked();
-                // 学习梯子步骤2：通道解析——实例字段优先（TgBot /task 显式设置），
-                // 否则回退 AgentLoop 维护的 PhoneTools.sessionChannel
+                askedOnce = true;
+                // 通道由调用方显式 setChannel（app/remote），未设置按本地处理
                 String ch = channel;
-                if (ch == null || ch.isEmpty()) {
-                    try {
-                        ch = PhoneTools.sessionChannel;
-                    } catch (Exception ignored) {
-                    }
-                }
                 boolean useOverlay = ("app".equals(ch)
                         || ch == null || ch.isEmpty()) && !remote;
                 if (useOverlay) {
@@ -1138,39 +999,8 @@ public class TaskRunner {
                         return false;
                     }
                 }
-                if ("tg".equals(ch)) {
-                    // 学习梯子步骤2：TG 同步提问——任务线程挂起，
-                    // 等主人下一条回复（120s 超时），轮询线程继续收消息不死锁
-                    try {
-                        TgBot bot = TgBot.current();
-                        if (bot != null && bot.isRunning()) {
-                            String ans = bot.askUserSync(
-                                    bot.getOwnerChatId(), payload,
-                                    optList, 120000L);
-                            if (ans != null && !ans.isEmpty()) {
-                                lastOutput = "用户选择了：「" + ans
-                                        + "」。请按此选择继续。";
-                                log("用户回答: " + ans);
-                                return true;
-                            }
-                            if (ans == null) {
-                                lastOutput = "用户 120 秒内未回应（按默认处理）。"
-                                        + "请在结论中说明情况并收尾，不要重复提问。";
-                                log("TG 提问超时，用户未回应");
-                            } else {
-                                lastOutput = "用户取消了提问（发送了新指令）。"
-                                        + "请停止追问并收尾。";
-                                log("TG 提问被新指令打断");
-                            }
-                            return false;
-                        }
-                        log("TG Bot 未运行，转结论提问");
-                    } catch (Exception e) {
-                        log("TG 提问异常（" + e.getMessage() + "），转结论提问");
-                    }
-                }
                 // 远控通道：HTTP 异步 taskId 模式无聊天回路，任务内无同步提问能力，
-                // 诚实降级——模型把选项式问题写进最终结论，用户回复即新任务。
+                // 诚实降级——调用方把选项式问题写进最终结论，用户回复即新任务。
                 lastOutput = "当前通道（" + ch + "）不支持任务内同步提问。"
                         + "请把下面的选项式问题原样写进最终结论，"
                         + "用户回复后另起任务继续：\n" + payload;
@@ -1178,55 +1008,34 @@ public class TaskRunner {
                 return false;
             }
             case "vision": {
-                // 视觉问答：截屏发给视觉模型（看不到的按钮/判断前后摄像头就用它）
+                // 视觉问答已简化：手机端不再调模型，只做本地文字定位
+                // （从问题里抠候选文字，在无障碍节点树找坐标）。
+                // 找不到时请云端用 /screenshot 看图后发带坐标的 tap。
                 String question = st.optString("question",
                         "描述这张截图，指出关键可点击元素的位置");
                 try {
-                    // v3.14：虚拟屏模式下截虚拟屏
-                    // 两级截屏：无障碍 → root 兜底（部分机型无障碍截屏直接失败）
-                    android.graphics.Bitmap shot = (vdMode
-                            && VirtualDisplayManager.isActive())
-                            ? VirtualDisplayManager.screenshot()
-                            : ScreenshotUtil.capture(ctx);
-                    if (shot == null) {
-                        log("截屏失败（无障碍与 root 均不可用），无法调用视觉模型");
+                    if (vdMode && VirtualDisplayManager.isActive()) {
+                        // 虚拟屏无节点树，本地定位读的是主屏树，坐标会错屏：
+                        // 直接失败，让云端看虚拟屏截图后发带坐标的 vd_tap
+                        lastOutput = "虚拟屏下无本地定位（虚拟屏无节点树）。"
+                                + "请云端用 /screenshot?vd=1 看图后发带坐标的 vd_tap。";
+                        log(lastOutput);
                         return false;
                     }
-                    // v3.13 Issue 11：先看有没有可用模型，没有则本地降级
-                    AuxModelStore aux = new AuxModelStore(ctx);
-                    AuxModelStore.AuxModel vm = aux.getVisionModel();
-                    boolean hasAux = vm != null && !vm.apiKey.isEmpty()
-                            && !vm.baseUrl.isEmpty();
-                    LlmStore ls0 = new LlmStore(ctx);
-                    boolean hasMain = ls0.hasKey();
-                    if (!hasAux && !hasMain) {
-                        // 本地降级：从无障碍节点树找文字坐标（零依赖）
-                        String local = visionLocalFallback(question);
-                        if (local != null) {
-                            lastOutput = local;
-                            log("👁 本地降级命中: " + local);
-                            String saveAs0 = st.optString("save_as", "");
-                            if (!saveAs0.isEmpty()) params.put(saveAs0, lastOutput);
-                            return true;
-                        }
-                        log("未配置大模型 key，本地降级也未找到匹配文字");
-                        return false;
+                    String local = visionLocalFallback(question);
+                    if (local != null) {
+                        lastOutput = local;
+                        log("👁 本地定位命中: " + local);
+                        String saveAs = st.optString("save_as", "");
+                        if (!saveAs.isEmpty()) params.put(saveAs, lastOutput);
+                        return true;
                     }
-                    // v3.17：走 visionAsk（辅助失败自动降级主力）
-                    // v3.38：坐标统一口径——要求视觉模型以 0-1000 归一化回答，
-                    // 与 tap 的归一化入参对齐，避免缩放图像素与设备像素混用
-                    log("👁 视觉提问: " + question);
-                    String vans = visionAsk(question
-                            + "（如需给出坐标，请用 0-1000 归一化坐标：左上角 (0,0)，"
-                            + "右下角 (1000,1000)，不要用像素坐标）", shot);
-                    boolean vok = !vans.isEmpty();
-                    lastOutput = vok ? vans : "视觉调用失败（辅助与主力均不可用）";
-                    log("👁 视觉回答: " + lastOutput);
-                    String saveAs = st.optString("save_as", "");
-                    if (!saveAs.isEmpty()) params.put(saveAs, lastOutput);
-                    return vok;
+                    lastOutput = "本地文字定位未命中（节点树里无匹配文字）。"
+                            + "请云端用 /screenshot 看图后发带坐标的 tap。";
+                    log(lastOutput);
+                    return false;
                 } catch (Exception e) {
-                    log("视觉调用异常: " + e.getMessage());
+                    log("本地定位异常: " + e.getMessage());
                     return false;
                 }
             }
@@ -1473,8 +1282,7 @@ public class TaskRunner {
                 // 页面（登录、二维码、付款确认、结果页）时调用，把任务交回
                 // 实体屏继续。诚实边界：GSIC 没有系统级任务迁移能力，交回
                 // 是 force-stop 后在主屏重起，当前页状态可能丢失——不到必要
-                // 时不用；交回后 vdMode 关掉，后续走实体屏，AgentLoop 的
-                // 跳出同步会把主显示切回实体屏，任务结束仍回 GSIC 主页。
+                // 时不用；交回后 vdMode 关掉，后续走实体屏，任务结束仍回 GSIC 主页。
                 if (!vdMode || !VirtualDisplayManager.isActive()) {
                     lastOutput = "当前任务不在虚拟屏，无需交回主屏，继续在实体屏执行即可。";
                     log(lastOutput);
@@ -1800,20 +1608,8 @@ public class TaskRunner {
                 log("kill " + pid + ": " + r);
                 return true;
             }
-            case "remember": {
-                // v2.85：写长期记忆 {"do":"remember","key":"喜欢的歌手","value":"周杰伦"}
-                String k = st.optString("key", "");
-                String v = st.optString("value", "");
-                if (k.isEmpty()) {
-                    log("remember 缺少 key");
-                    return false;
-                }
-                UserMemory.put(ctx, k, v);
-                log("已记住：" + k + "＝" + v);
-                return true;
-            }
             case "use_card": {
-                // v3.58 步骤3：调卡 + 生命周期状态机落账 + 失败时界面地图联动。
+                // v3.58 步骤3：调卡 + 生命周期状态机落账。
                 // 计数由 recordUse 一次完成（旧的 incrementUse 已移除，避免双计数）。
                 String cardId = st.getString("id");
                 SkillCardStore cardStore = new SkillCardStore(ctx);
@@ -1839,18 +1635,6 @@ public class TaskRunner {
                     } else if ("needs_repair".equals(outcome)) {
                         log("📇 调卡失败，已打回草稿待修卡："
                                 + (failNoteOut[0] == null ? "" : failNoteOut[0]));
-                    }
-                    if (!cardDone && card.appPkg != null && !card.appPkg.isEmpty()
-                            && cogStore != null) {
-                        // 卡的步骤失效时先对地图：把关联 App 的界面地图/图标词典
-                        // 注入 lastOutput，供修卡方先读地图、再调 repair 修卡
-                        String ib = cogStore.iconBlock(card.appPkg);
-                        if (!ib.isEmpty()) {
-                            lastOutput = lastOutput + "\n[界面地图·供修卡参考]"
-                                    + "卡的步骤失效，先对地图再改卡：\n" + ib;
-                            log("📇 已注入关联 App（" + card.appPkg
-                                    + "）的界面地图/图标词典供修卡参考");
-                        }
                     }
                 }
                 return cardDone;
@@ -2012,7 +1796,7 @@ public class TaskRunner {
                     + "请严格按下述说明、用你自己的工具逐步完成，"
                     + "结束条件以说明为准；说明与本次目标冲突处以用户本次目标为准。"
                     + "[注意：以下是一段文字说明，不是手机屏幕上的内容；"
-                    + "不要用 tap_text 去点击说明里的文字，按说明打开对应 App 后用 vision 定位再 tap]\n"
+                    + "不要用 tap_text 去点击说明里的文字，按说明打开对应 App 后用 /screenshot 看图、发带坐标的 tap]\n"
                     + card.content;
             log("📇 说明型技能卡，已把说明全文回给执行者：" + card.name);
             return true;
@@ -2076,7 +1860,7 @@ public class TaskRunner {
      * stepSum 为失败步骤摘要，output 为执行输出/错误文本（供病因分类）。
      */
     static String buildCardFailNote(String kind, int stepNo, String stepSum, String output) {
-        String c = Telemetry.classifyFail("use_card", false, output);
+        String c = classifyFail(output);
         if (c == null || c.isEmpty()) c = "unknown";
         if ("parse".equals(kind)) {
             return "技能卡解析异常：" + (stepSum == null ? "" : stepSum) + "；病因：" + c;
@@ -2093,6 +1877,57 @@ public class TaskRunner {
         if (s.length() > 160) s = s.substring(0, 160) + "…";
         return "第" + stepNo + "步失败：" + s + "；病因：" + c;
     }
+    /**
+     * 失败病因分类（原 Telemetry.classifyFail 的本地版，关键词匹配）。
+     * 返回：timeout / permission_denied / page_not_ready /
+     * element_missing / coord_off / unknown。
+     */
+    static String classifyFail(String text) {
+        String t = (text == null ? "" : text);
+        String low = t.toLowerCase();
+        if (t.contains("超时") || low.contains("timeout") || low.contains("timed out")
+                || low.contains("sockettimeout")) return "timeout";
+        if (t.contains("权限") || low.contains("permission")) return "permission_denied";
+        if (t.contains("未加载") || t.contains("加载中") || low.contains("not ready"))
+            return "page_not_ready";
+        if (t.contains("未找到") || t.contains("不存在") || low.contains("not found")
+                || low.contains("nosuchelement")) return "element_missing";
+        if (t.contains("偏") || t.contains("偏移") || low.contains("offset")) return "coord_off";
+        return "unknown";
+    }
+
+    /** ask_user 选项上限（悬浮窗一行放不下太多按钮，原 LearningLadder.MAX_ASK_OPTIONS） */
+    private static final int MAX_ASK_OPTIONS = 4;
+
+    /** 选项裁剪到上限，去空去重（原 LearningLadder.capOptions）。 */
+    static String[] capOptions(String[] options) {
+        if (options == null) return new String[0];
+        java.util.List<String> out = new java.util.ArrayList<String>();
+        for (String o : options) {
+            if (o == null) continue;
+            String t = o.trim();
+            if (t.isEmpty() || out.contains(t)) continue;
+            out.add(t);
+        }
+        if (out.size() > MAX_ASK_OPTIONS) out = out.subList(0, MAX_ASK_OPTIONS);
+        return out.toArray(new String[0]);
+    }
+
+    /** 选项式提问的统一文本格式（原 LearningLadder.formatAsk）。 */
+    static String formatAsk(String question, String[] options) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("? ").append(question == null ? "" : question.trim()).append("\n");
+        String[] opts = capOptions(options);
+        if (opts.length == 0) {
+            sb.append("(开放式提问，请直接回复)");
+        } else {
+            for (int i = 0; i < opts.length; i++) {
+                sb.append("\n").append(i + 1).append(". ").append(opts[i]);
+            }
+        }
+        return sb.toString();
+    }
+
     /**
      * v3.13 Issue 11：本地视觉降级（零依赖）。
      * 从问题中提取候选文字，在无障碍节点树里找匹配节点的中心坐标。

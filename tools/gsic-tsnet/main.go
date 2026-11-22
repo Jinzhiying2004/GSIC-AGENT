@@ -21,6 +21,11 @@
 //	                        类别（控制面 400/超时/DNS 失败等），绝不含密钥、
 //	                        链接、节点密钥；Java 层卡面展示，替代干巴巴的
 //	                        “正在拉取”
+//	TSNET_NET=<BackendState>  监听就绪后每 15 秒查一次 LocalClient 状态，
+//	                        变化即报一行（如 Running），60 秒无变化也重报
+//	                        一次当作活信号；Java 层据此判断节点是真连着
+//	                        还是假活（进程在但控制面已断），断连超时即
+//	                        重启进程。v4.21 新增。
 //
 // 其余 tsnet 内部日志走 stderr，Java 侧忽略。
 //
@@ -373,6 +378,9 @@ func realMain() int {
 	emit("TSNET_READY")
 	fmt.Fprintln(os.Stderr, "gsic-tsnet listening on tailnet, forwarding to "+*forward)
 
+	// v4.21：运行态上报 goroutine（见 reportNetState）。
+	go reportNetState(srv, done)
+
 	go func() {
 		<-done
 		ln.Close()
@@ -393,6 +401,41 @@ func realMain() int {
 			continue
 		}
 		go proxyConn(c, *forward)
+	}
+}
+
+// reportNetState：v4.21 运行期后端状态上报。监听就绪后每 15 秒查一次
+// LocalClient Status，BackendState 变化即报一行 TSNET_NET=<状态>，
+// 60 秒无变化也重报一次当作活信号；Java 层据此判断节点是真连着还是
+// 假活（进程在但控制面已断）。拿不到 LocalClient 时静默退出，不影响
+// 转发主循环；done 关闭即返回。
+func reportNetState(srv *tsnet.Server, done chan struct{}) {
+	lc, err := srv.LocalClient()
+	if err != nil || lc == nil {
+		return
+	}
+	last := ""
+	lastEmit := time.Now()
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+		}
+		state := "Unknown"
+		if st, err := lc.Status(context.Background()); err == nil && st != nil {
+			if s := string(st.BackendState); s != "" {
+				state = s
+			}
+		}
+		now := time.Now()
+		if state != last || now.Sub(lastEmit) >= 60*time.Second {
+			emit("TSNET_NET=" + state)
+			last = state
+			lastEmit = now
+		}
 	}
 }
 

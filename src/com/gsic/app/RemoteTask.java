@@ -8,75 +8,69 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * 远控目标式任务（/task goal 模式）的实时状态。
+ * 远控步骤任务（/task steps 模式）的实时状态。
  *
- * <p>手机端 AgentLoop 跑在后台线程，思考过程（💭）与执行日志经 Listener
+ * <p>手机端 TaskRunner 跑在后台线程，执行日志经 Listener
  * 写入这里；云端用 {@code GET /task/status} 轮询，App 内远控页用卡片展示，
  * 做到"边跑边看"，不再是跑完才一次性返回。</p>
  *
- * <p>纯 Java + org.json，可独立 JVM 单测（step/think 解析逻辑）。</p>
+ * <p>goal 模式已移除：不再有思考过程与低置信澄清；
+ * 步数从"步骤 N/M"日志解析，总步数由下发方在构造时传入。</p>
+ *
+ * <p>纯 Java + org.json，可独立 JVM 单测（step 解析逻辑）。</p>
  */
 public class RemoteTask {
 
     private static int seq = 0;
 
     public final String taskId;
-    public final String goal;
-    public final int maxSteps;
+    /** 任务名（steps 任务的 name 字段，下发方传入） */
+    public final String name;
+    /** 总步数（steps 数组长度，下发方传入；未知时传 0） */
+    public final int totalSteps;
     public final long startTime = System.currentTimeMillis();
     public final List<String> logs =
             Collections.synchronizedList(new ArrayList<String>());
     public volatile boolean done = false;
     public volatile boolean ok = false;
     public volatile String error = "";
-    /** v3.21：远程停止请求（/task/stop 置位，AgentLoop 每轮检查） */
+    /** v3.21：远程停止请求（/task/stop 置位，异步执行方需据此调 TaskRunner.stop()） */
     public volatile boolean stopRequested = false;
     public volatile JSONArray audit = null;
-    // v3.50 第 3 步：低置信拦截状态（/task 返回 needs_clarify，云端决定如何澄清）
-    public volatile boolean needsClarify = false;
-    public volatile String clarifyQuestion = "";
-    public final List<String> clarifyOptions =
-            Collections.synchronizedList(new ArrayList<String>());
 
-    public RemoteTask(String goal, int maxSteps) {
+    public RemoteTask(String name, int totalSteps) {
         this.taskId = "rt-" + (++seq) + "-" + (startTime % 100000);
-        this.goal = goal;
-        this.maxSteps = maxSteps;
+        this.name = name == null ? "" : name;
+        this.totalSteps = totalSteps;
     }
 
     public void log(String m) {
         if (m != null) logs.add(m);
     }
 
-    /** 当前步数：从最近一条"🤔 第 N 步"日志解析；无则为 0 */
+    /** 当前步数：从最近一条"步骤 N/M: ..."日志解析；无则为 0 */
     public int step() {
         synchronized (logs) {
             for (int i = logs.size() - 1; i >= 0; i--) {
                 String l = logs.get(i);
-                int a = l.indexOf("第 ");
-                int b = l.indexOf(" 步", a);
-                if (l.startsWith("🤔") && a > 0 && b > a) {
-                    try {
-                        return Integer.parseInt(
-                                l.substring(a + 2, b).trim());
-                    } catch (Exception ignored) {
-                    }
+                if (!l.startsWith("步骤 ")) continue;
+                int slash = l.indexOf('/');
+                if (slash <= 3) continue;
+                try {
+                    return Integer.parseInt(l.substring(3, slash).trim());
+                } catch (Exception ignored) {
                 }
             }
         }
         return 0;
     }
 
-    /** 最近一次思考：最近一条"💭 ..."日志的正文；无则为空 */
-    public String think() {
+    /** 最近一条日志（当前状态）；无则为空 */
+    public String lastLog() {
         synchronized (logs) {
-            for (int i = logs.size() - 1; i >= 0; i--) {
-                String l = logs.get(i);
-                int p = l.indexOf("💭");
-                if (p >= 0) return l.substring(p + 2).trim();
-            }
+            if (logs.isEmpty()) return "";
+            return logs.get(logs.size() - 1);
         }
-        return "";
     }
 
     /** 最近 n 条日志（按时间顺序） */
@@ -97,28 +91,17 @@ public class RemoteTask {
         try {
             o.put("ok", true);
             o.put("taskId", taskId);
-            o.put("goal", goal);
-            o.put("maxSteps", maxSteps);
+            o.put("name", name);
+            o.put("totalSteps", totalSteps);
             o.put("done", done);
             o.put("resultOk", ok);
             if (!error.isEmpty()) o.put("error", error);
             o.put("step", step());
-            o.put("think", think());
             o.put("elapsedSec", elapsedSec());
             JSONArray arr = new JSONArray();
             for (String l : tail(25)) arr.put(l);
             o.put("log", arr);
             if (audit != null) o.put("audit", audit);
-            // v3.50 第 3 步：低置信拦截时带上澄清问题与选项
-            if (needsClarify) {
-                o.put("needs_clarify", true);
-                o.put("question", clarifyQuestion);
-                JSONArray opts = new JSONArray();
-                synchronized (clarifyOptions) {
-                    for (String s : clarifyOptions) opts.put(s);
-                }
-                o.put("options", opts);
-            }
         } catch (Exception ignored) {
         }
         return o;

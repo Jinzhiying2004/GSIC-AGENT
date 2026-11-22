@@ -10,13 +10,16 @@ import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 极简 HTTP 服务器（无第三方依赖），供外部控制器（本机/Tailscale）调用。
- * 所有接口都需要 token 鉴权：?token=xxx 或 Header X-Token。
+ * 所有接口都需要 token 鉴权：请求头 X-Token（Issue #1 起不再接受 ?token= 查询参数）。
  * v2.42 起只放行本机回环与 Tailscale 网段，其他来源在 accept 后直接断开
  *（8crsk 安全模式；局域网直连不再可用，Tailscale 断线时云端无法直连）。
+ * Issue #1：并发上限 8 工作线程 + 32 排队，超限立即断开；单请求读取总时限 30 秒。
  */
 public class AgentHttpServer {
 
@@ -25,6 +28,11 @@ public class AgentHttpServer {
                       Map<String, String> headers, String body,
                       byte[] rawBody) throws Exception;
     }
+
+    /** Issue #1：并发上限（8 线程 + 32 排队）与单请求读取总时限（30 秒） */
+    private static final int MAX_THREADS = 8;
+    private static final int MAX_QUEUED = 32;
+    private static final long REQUEST_DEADLINE_MS = 30000;
 
     private final int port;
     private final Handler handler;
@@ -40,7 +48,10 @@ public class AgentHttpServer {
     public void start() throws Exception {
         server = new ServerSocket(port);
         running = true;
-        pool = Executors.newCachedThreadPool();
+        pool = new ThreadPoolExecutor(MAX_THREADS, MAX_THREADS,
+                60L, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(MAX_QUEUED),
+                new ThreadPoolExecutor.AbortPolicy());
         Thread t = new Thread(this::loop, "agent-http");
         t.setDaemon(true);
         t.start();
@@ -66,7 +77,15 @@ public class AgentHttpServer {
                     }
                     continue;
                 }
-                pool.execute(() -> serve(s));
+                try {
+                    pool.execute(() -> serve(s));
+                } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                    // 并发已满：立即断开，不排队、不阻塞 accept
+                    try {
+                        s.close();
+                    } catch (Exception ignored) {
+                    }
+                }
             } catch (Exception e) {
                 if (running) {
                     try {
@@ -111,6 +130,8 @@ public class AgentHttpServer {
     private void serve(Socket sock) {
         try (Socket s = sock) {
             s.setSoTimeout(30000);
+            // Issue #1：单请求读取总时限（慢速滴灌也不能无限占线程）
+            long deadline = System.currentTimeMillis() + REQUEST_DEADLINE_MS;
             InputStream in = s.getInputStream();
             OutputStream out = s.getOutputStream();
 
@@ -120,6 +141,7 @@ public class AgentHttpServer {
             byte[] last4 = new byte[4];
             int n = 0;
             while ((b = in.read()) != -1) {
+                if (System.currentTimeMillis() > deadline) return; // 读取超时，断开
                 headBuf.write(b);
                 last4[n % 4] = (byte) b;
                 n++;
@@ -168,6 +190,7 @@ public class AgentHttpServer {
             byte[] bodyBytes = new byte[Math.min(contentLen, 1 << 20)];
             int read = 0;
             while (read < bodyBytes.length) {
+                if (System.currentTimeMillis() > deadline) return; // 读取超时，断开
                 int r = in.read(bodyBytes, read, bodyBytes.length - read);
                 if (r < 0) break;
                 read += r;

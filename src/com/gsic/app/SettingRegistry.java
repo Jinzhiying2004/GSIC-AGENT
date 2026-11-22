@@ -44,7 +44,7 @@ public class SettingRegistry {
     public static final String G_CONN = "连接与远控";
     public static final String G_NET = "网络与代理";
     public static final String G_MODEL = "模型与 Provider";
-    public static final String G_AGENT = "智能体行为";
+    public static final String G_AGENT = "技能卡";
     public static final String G_STORE = "存储与日志";
     public static final String G_ABOUT = "关于与安全";
 
@@ -74,20 +74,10 @@ public class SettingRegistry {
         x.jumpKey = "tsnet"; x.dangerous = true; out.add(x);
         x = f("conn.relay", G_CONN, "Muse 服务器模式", "反向出站中继开关在原卡", Kind.JUMP);
         x.jumpKey = "relay"; out.add(x);
-        x = f("model.main_model", G_MODEL, "主模型", "只读：当前主模型名", Kind.INFO);
-        out.add(x);
-        x = f("model.provider", G_MODEL, "模型与 Provider 配置", "Key 与 Provider 在智能体页配置", Kind.JUMP);
-        x.jumpKey = "agenttab"; out.add(x);
-        x = f("agent.chat_follow", G_AGENT, "对话跟随滚动", "流式输出时自动跟随到底；上滑即停跟随", Kind.BOOL);
-        x.def = "true"; out.add(x);
-        x = f("agent.loop_warn", G_AGENT, "防环警告阈值", "同一动作连续重复几次警告并换策略（1–10）", Kind.INT);
-        x.def = "3"; x.min = 1; x.max = 10; out.add(x);
-        x = f("agent.loop_fuse", G_AGENT, "防环熔断阈值", "同一动作连续重复几次熔断停任务（2–20）", Kind.INT);
-        x.def = "5"; x.min = 2; x.max = 20; out.add(x);
         x = f("agent.skill_autodeprioritize", G_AGENT, "技能卡长期未用自动降权", "30 天未用的卡排到注入末尾（不删除）", Kind.BOOL);
         x.def = "true"; out.add(x);
-        x = f("agent.skills", G_AGENT, "技能卡管理", "启用开关与本次会话覆盖在智能体页技能卡行", Kind.JUMP);
-        x.jumpKey = "agenttab"; out.add(x);
+        x = f("agent.skills", G_AGENT, "技能卡管理", "启用开关与本次会话覆盖在主页技能卡行", Kind.JUMP);
+        x.jumpKey = "home:skill"; out.add(x);
         x = f("store.audit_enabled", G_STORE, "记录配置变更审计", "只记改了哪项与新旧摘要，密钥只记“已更改”", Kind.BOOL);
         x.def = "true"; out.add(x);
         x = f("about.version", G_ABOUT, "版本", "只读", Kind.INFO);
@@ -106,7 +96,7 @@ public class SettingRegistry {
     }
 
     public static String[] groups() {
-        return new String[]{G_UI, G_CONN, G_NET, G_MODEL, G_AGENT, G_STORE, G_ABOUT};
+        return new String[]{G_UI, G_CONN, G_NET, G_AGENT, G_STORE, G_ABOUT};
     }
 
     private static SharedPreferences prefs(Context ctx) {

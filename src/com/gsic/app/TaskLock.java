@@ -4,7 +4,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * v3.11 Issue 14：三通道任务互斥锁。
- * App / TG / 远控同时只能跑一个 AgentLoop 任务，避免状态冲突。
+ * App / 远控 / 中继同时只能跑一个任务，避免状态冲突。
  */
 public class TaskLock {
 

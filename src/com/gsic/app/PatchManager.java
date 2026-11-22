@@ -165,11 +165,8 @@ public final class PatchManager {
                     || !new File(dir, META + ".tmp").renameTo(new File(dir, META))) {
                 return new PatchResult(false, "补丁落盘失败", null);
             }
-            try {
-                new BehaviorLog(ctx).log(BehaviorLog.SYS, "热补丁",
-                        "收到补丁 " + tag + "，校验通过，准备重启生效");
-            } catch (Exception ignored) {
-            }
+            android.util.Log.i("PatchManager",
+                    "热补丁：收到补丁 " + tag + "，校验通过，准备重启生效");
             return new PatchResult(true, null, tag);
         } catch (Exception e) {
             return new PatchResult(false, "应用补丁失败: " + e.getMessage(), null);
@@ -248,10 +245,7 @@ public final class PatchManager {
                 // noinspection ResultOfMethodCallIgnored
                 new File(dir, META).delete();
             }
-            try {
-                new BehaviorLog(ctx).log(BehaviorLog.SYS, "热补丁", "已回滚到上一个补丁");
-            } catch (Exception ignored) {
-            }
+            android.util.Log.i("PatchManager", "热补丁：已回滚到上一个补丁");
             return null;
         } catch (Exception e) {
             return "回滚失败: " + e.getMessage();

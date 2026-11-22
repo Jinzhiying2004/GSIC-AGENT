@@ -26,8 +26,8 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 三栏主界面：主页（状态/技能/定时/记录） / 远控 / 我的（关于）。
- * Material 风格：顶栏 + 卡片。三栏导航沿用 1.12。
+ * 四栏主界面：主页（状态/技能/定时） / 远控 / 终端 / 我的（关于）。
+ * Material 风格：顶栏 + 卡片。四栏导航（v4.23 起智能体页已删，大脑在云端 Muse，本机只按步骤执行）。
  */
 public class MainActivity extends Activity {
 
@@ -45,17 +45,15 @@ public class MainActivity extends Activity {
     private static final int REQ_IMPORT = 1001;
     private static final int REQ_FILE_IN = 1002;
 
-    private LinearLayout pageHome, pageRemote, pageAgent, pageTerm, pageMy;
-    private TabIconView tabHome, tabRemote, tabAgent, tabTerm, tabMy;
+    private LinearLayout pageHome, pageRemote, pageTerm, pageMy;
+    private TabIconView tabHome, tabRemote, tabTerm, tabMy;
     // v2.64：tabBar 和 content 改字段，供焦点监听控制显隐
     private LinearLayout tabBarView;
     private LinearLayout contentView;
 
     private TextView statusView, svcStatusView;
     private TextView adbStatusView, shizukuStatusView, wifiAdbStatusView;
-    private LinearLayout skillsBox, schedBox, histBox, skillCardsBox;
-    private LinearLayout llmProfilesBox;
-    private boolean llmNewMode = false;
+    private LinearLayout skillsBox, schedBox, skillCardsBox;
     private TextView svcInfo;
 
     // 终端页
@@ -74,42 +72,9 @@ public class MainActivity extends Activity {
     private LinearLayout termEnvCard, termTxCard, termInputRow;
     private ScrollView termPageScroll;
     private boolean termFollow = true;
-    // 云端大模型
-    private LlmStore llmStore;
-    private String llmProvider;
-    private EditText llmBaseUrl, llmApiKey, llmModel, llmVisionModel,
-            llmAsk, llmNameInput;
-    private LinearLayout auxModelsBox;
-    private AuxModelStore auxModelStore;
-    private android.widget.Spinner askModelSpinner;
-    private String askModelOverride = "";
-    private android.widget.Spinner agentModelSpinner;
-    private String agentModelOverride = "";
-    private BehaviorLog behaviorLog;
-    private TextView llmStatus, llmReply;
-    // AI 智能执行（Agent 循环）
-    private EditText agentGoal;
-    private LinearLayout agentInputBar;
-    private android.view.View agentTopHeader, agentTopModel, agentTopRisk;
-    private boolean agentTopCollapsed = false;
-    private android.graphics.drawable.Drawable agentInputBg;
-    private FlowLightDrawable agentInputFlow;
-    private LinearLayout agentMsgBox;
-    private Button agentSendBtn;
-    private android.widget.CheckBox agentAdvBox;
-    private android.widget.CheckBox agentSupervisorBox;
-    // v2.62：监管者独立输出区
-    private LinearLayout supervisorMsgBox;
-    private ScrollView supervisorScrollView;
+    // 动作审批策略（技能/技能卡运行的 Approver 依赖，保留）
     private ActionRisk.Policy riskPolicy;
     private android.widget.TextView riskSummaryView;
-    private ChatStore chatStore;
-    private String lastGoal = "";
-    private String lastHistory = "";
-    private final java.util.concurrent.ConcurrentLinkedQueue<String> feedbackQueue =
-            new java.util.concurrent.ConcurrentLinkedQueue<>();
-    private boolean loadingHistory = false;
-    private Runnable agentFloatHintRefresher;
     // v3.52 地基·流光写死：软件内嵌彩条——不走悬浮窗，直接长在界面根布局上，
     // 500ms 对表任务状态（FloatWindow.isTaskActive，三端共用同一状态源）：
     // 任何通道的任务在跑，打开软件必见彩条，与悬浮窗互为双保险
@@ -291,16 +256,7 @@ public class MainActivity extends Activity {
             inAppFlowHandler.postDelayed(this, 500);
         }
     };
-    private android.app.AlertDialog chatHistoryDialog;
-    private LinearLayout userProfileBox;
-    private UserProfile userProfile;
     private CaptureStore captureStore;
-    private FollowScrollView agentScrollView;
-    private volatile boolean agentStop = true;
-    private Thread agentThread;
-    // v3.83：纯聊天流式输出的线程与真取消句柄
-    private volatile Thread chatThread;
-    private LlmClient.StreamHandle chatStreamHandle;
     // 云端操控
     private TextView museTsStatus, museHelp;
     private Button museTsAppBtn;
@@ -309,18 +265,12 @@ public class MainActivity extends Activity {
     // 应用内更新
     private TextView updStatus;
     private android.widget.ProgressBar updProgress;
-    // Telegram 机器人
-    private TgStore tgStore;
-    // v3.05：TgBot 已搬到 AgentService，MainActivity 不再持有
-    private EditText tgToken;
-    private TextView tgStatus, tgOwner, tgLogView;
-    private android.widget.ScrollView tgScrollView;
-
     private SkillStore skillStore;
-    private HistoryStore historyStore;
     private ScheduleStore scheduleStore;
     private TaskRunner runner;
     private Thread runThread;
+    // 本地任务停止标志（审批弹窗里点"停止任务"时置位）
+    private volatile boolean localStop = false;
 
     // ---------- 基础组件 ----------
 
@@ -485,588 +435,8 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** Telegram Bot 日志（线程安全，自动滚到底） */
-    private void tgLog(String s) {
-        runOnUiThread(() -> {
-            if (tgLogView != null) {
-                tgLogView.append(s + "\n");
-                if (tgScrollView != null) {
-                    tgScrollView.post(() -> tgScrollView.fullScroll(
-                            android.view.View.FOCUS_DOWN));
-                }
-            }
-        });
-    }
-
-    private void refreshTg() {
-        if (tgStatus == null) return;
-        // v3.05：TG 在 Service 里跑，查 Service 状态
-        boolean run = AgentService.isTgRunning();
-        tgStatus.setText(tgStore.hasToken()
-                ? (run ? "运行中 ✅" : "已配置，未启动")
-                : "未配置 Bot Token");
-        tgStatus.setTextColor(tgStore.hasToken() && run ? GREEN : TEXT_GRAY);
-        tgOwner.setText(tgStore.hasOwner()
-                ? "主人已绑定 ✅" : "主人未绑定（给机器人发 /start）");
-        if (tgStore.hasToken()) {
-            tgToken.setHint("Bot Token（" + tgStore.getMaskedToken() + "，留空保留）");
-        }
-    }
-
-    // v3.08：任务完成后的日志入口按钮
-    private void showTaskLogButton(String logPath) {
-        try {
-            java.io.File f = new java.io.File(logPath);
-            String name = f.getName();
-            // 转成可读时间
-            String timeStr = name;
-            try {
-                // task_20261019_143022_ab12.log -> 2026-10-19 14:30:22
-                String dt = name.substring(5, 20);
-                timeStr = dt.substring(0, 4) + "-" + dt.substring(4, 6) + "-"
-                        + dt.substring(6, 8) + " " + dt.substring(9, 11) + ":"
-                        + dt.substring(11, 13) + ":" + dt.substring(13, 15);
-            } catch (Exception ignored) {
-            }
-            LinearLayout row = new LinearLayout(this);
-            row.setOrientation(LinearLayout.HORIZONTAL);
-            row.setGravity(Gravity.START);
-            row.setPadding(0, dp(4), 0, dp(4));
-            Button btn = new Button(this);
-            btn.setText("📝 任务日志 " + timeStr);
-            btn.setTextSize(12);
-            final java.io.File logFile = new java.io.File(logPath);
-            btn.setOnClickListener(v -> showTaskLogContent(logFile));
-            row.addView(btn);
-            agentMsgBox.addView(row);
-            if (agentScrollView != null) {
-                agentScrollView.post(() -> agentScrollView.fullScroll(
-                        android.view.View.FOCUS_DOWN));
-            }
-        } catch (Exception ignored) {
-        }
-    }
-
-    /** AI 智能执行日志 → 聊天气泡（线程安全，自动滚到底） */
-    private void agentLog(String s) {
-        runOnUiThread(() -> {
-            if (agentMsgBox == null) return;
-            String time = new java.text.SimpleDateFormat("HH:mm",
-                    java.util.Locale.getDefault()).format(new java.util.Date());
-            if (s.startsWith("\uD83C\uDFAF")) { // 🎯 用户目标
-                addChatBubble(s.replaceFirst("^[^ ]+ ", ""), true, time);
-            } else if (s.startsWith("✅") || s.startsWith("\uD83C\uDF89")
-                    || s.startsWith("⏹") || s.startsWith("\uD83D\uDED1")) {
-                addChatSystem(s, time);
-            } else {
-                addChatBubble(s, false, time);
-            }
-            if (agentScrollView != null) {
-                agentScrollView.post(() -> agentScrollView.fullScroll(
-                        android.view.View.FOCUS_DOWN));
-            }
-        });
-    }
-
-    // v2.62：监管者独立输出（与智能体分开）
-    private void supervisorLog(String s) {
-        runOnUiThread(() -> {
-            if (supervisorMsgBox == null) return;
-            TextView tv = new TextView(this);
-            tv.setText(s);
-            tv.setTextSize(11);
-            tv.setTextColor(DyColor.onSurfaceVariant(this));
-            tv.setPadding(dp(8), dp(4), dp(8), dp(4));
-            tv.setTextIsSelectable(true);
-            supervisorMsgBox.addView(tv);
-            if (supervisorScrollView != null) {
-                supervisorScrollView.post(() -> supervisorScrollView.fullScroll(
-                        android.view.View.FOCUS_DOWN));
-            }
-        });
-    }
-
-    private android.graphics.drawable.GradientDrawable bubbleBg(int color, float r) {
-        android.graphics.drawable.GradientDrawable d =
-                new android.graphics.drawable.GradientDrawable();
-        d.setCornerRadius(dp((int) r));
-        d.setColor(color);
-        return d;
-    }
-
-    /** 聊天气泡：isUser 右蓝左灰 */
-    // v3.02：流式气泡，返回 TextView 供追加 token
-    private TextView startStreamBubble() {
-        final TextView[] holder = new TextView[1];
-        runOnUiThread(() -> {
-            int maxW = (int) (getResources().getDisplayMetrics().widthPixels * 0.78);
-            LinearLayout row = new LinearLayout(this);
-            row.setOrientation(LinearLayout.HORIZONTAL);
-            row.setGravity(Gravity.START);
-            row.setPadding(0, dp(6), 0, dp(6));
-
-            LinearLayout bubble = new LinearLayout(this);
-            bubble.setOrientation(LinearLayout.VERTICAL);
-            bubble.setBackground(bubbleBg(DyColor.surfaceVariant(this), 18));
-            bubble.setPadding(dp(12), dp(8), dp(12), dp(6));
-
-            TextView msg = new TextView(this);
-            msg.setText("🤖 ");
-            msg.setTextSize(14);
-            msg.setTextColor(DyColor.onSurface(this));
-            msg.setTextIsSelectable(true);
-            msg.setMaxWidth(maxW);
-            msg.setLineSpacing(dp(2), 1f);
-            bubble.addView(msg);
-
-            row.addView(bubble);
-            agentMsgBox.addView(row);
-            if (agentScrollView != null && SettingRegistry.getBool(this, "agent.chat_follow", true) && agentScrollView.isAtBottom()) {
-                agentScrollView.post(() -> agentScrollView.fullScroll(
-                        android.view.View.FOCUS_DOWN));
-            }
-            holder[0] = msg;
-        });
-        // 等待 UI 线程创建完成（最多 1 秒）
-        long start = System.currentTimeMillis();
-        while (holder[0] == null
-                && System.currentTimeMillis() - start < 1000) {
-            try { Thread.sleep(10); } catch (InterruptedException ignored) {}
-        }
-        return holder[0];
-    }
-
-    private void addChatBubble(String text, boolean isUser, String time) {
-        int maxW = (int) (getResources().getDisplayMetrics().widthPixels * 0.78);
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(isUser ? Gravity.END : Gravity.START);
-        row.setPadding(0, dp(6), 0, dp(6));
-
-        LinearLayout bubble = new LinearLayout(this);
-        bubble.setOrientation(LinearLayout.VERTICAL);
-        bubble.setBackground(bubbleBg(isUser ? DyColor.primary(this)
-                : DyColor.surfaceVariant(this), 18));
-        bubble.setPadding(dp(12), dp(8), dp(12), dp(6));
-
-        TextView msg = new TextView(this);
-        msg.setText(text);
-        msg.setTextSize(14);
-        msg.setTextColor(isUser ? DyColor.onPrimary(this) : DyColor.onSurface(this));
-        msg.setTextIsSelectable(true);
-        msg.setMaxWidth(maxW);
-        msg.setLineSpacing(dp(2), 1f);
-        bubble.addView(msg);
-
-        TextView ts = new TextView(this);
-        ts.setText(time);
-        ts.setTextSize(10);
-        ts.setTextColor(isUser ? DyColor.onPrimary(this) : DyColor.onSurfaceVariant(this));
-        ts.setGravity(Gravity.END);
-        bubble.addView(ts);
-
-        row.addView(bubble);
-        agentMsgBox.addView(row);
-        if (chatStore != null && !loadingHistory) {
-            chatStore.append(isUser ? "user" : "agent", text, time);
-        }
-    }
-
-    /** 系统居中提示 */
-    private void addChatSystem(String text, String time) {
-        TextView t = new TextView(this);
-        t.setText(text + "  " + time);
-        t.setTextSize(12);
-        t.setTextColor(TEXT_GRAY);
-        t.setGravity(Gravity.CENTER);
-        t.setPadding(0, dp(6), 0, dp(6));
-        agentMsgBox.addView(t);
-        if (chatStore != null && !loadingHistory) {
-            chatStore.append("system", text, time);
-        }
-    }
-
-    /** 清空气泡（开始新任务时） */
-    private void clearChat() {
-        if (agentMsgBox != null) agentMsgBox.removeAllViews();
-    }
-
-    /** 历史对话菜单 */
-    private void showChatHistory() {
-        if (chatStore == null) return;
-        if (chatHistoryDialog != null && chatHistoryDialog.isShowing()) {
-            chatHistoryDialog.dismiss();
-        }
-        java.util.List<ChatStore.Session> ss = chatStore.listSessions();
-        if (ss.isEmpty()) {
-            agentLog("暂无历史对话");
-            return;
-        }
-        LinearLayout list = new LinearLayout(this);
-        list.setOrientation(LinearLayout.VERTICAL);
-        for (ChatStore.Session se : ss) {
-            final long sid = se.id;
-            LinearLayout row = new LinearLayout(this);
-            row.setOrientation(LinearLayout.HORIZONTAL);
-            row.setGravity(Gravity.CENTER_VERTICAL);
-            row.setPadding(dp(8), dp(10), dp(8), dp(10));
-            TextView t = new TextView(this);
-            t.setText(ChatStore.sessionTitle(se));
-            t.setTextSize(14);
-            t.setTextColor(DyColor.onSurface(this));
-            t.setLineSpacing(dp(2), 1f);
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-            row.addView(t, lp);
-            row.setClickable(true);
-            row.setFocusable(true);
-            row.setOnClickListener(v -> {
-                loadingHistory = true;
-                try {
-                    clearChat();
-                    ChatStore.Session target = chatStore.getSession(sid);
-                    if (target != null) {
-                        for (ChatStore.Msg m : target.msgs) {
-                            if ("user".equals(m.role)) addChatBubble(m.text, true, m.time);
-                            else if ("agent".equals(m.role)) addChatBubble(m.text, false, m.time);
-                            else addChatSystem(m.text, m.time);
-                        }
-                    }
-                } finally {
-                    loadingHistory = false;
-                }
-            });
-            Button delBtn = smallBtn("删除");
-            final long delId = se.id;
-            delBtn.setOnClickListener(v -> {
-                chatStore.deleteSession(delId);
-                // 刷新对话框：关掉重开
-                showChatHistory();
-            });
-            row.addView(delBtn);
-            list.addView(row);
-            if (se != ss.get(ss.size() - 1)) {
-                android.view.View div = new android.view.View(this);
-                div.setBackgroundColor(DyColor.outline(this));
-                list.addView(div, new LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT, dp(1)));
-            }
-        }
-        android.widget.ScrollView sv = new android.widget.ScrollView(this);
-        sv.addView(list);
-        chatHistoryDialog = new android.app.AlertDialog.Builder(this)
-                .setTitle("历史对话")
-                .setView(sv)
-                .setPositiveButton("关闭", null)
-                .show();
-        android.app.AlertDialog dlg = chatHistoryDialog;
-        android.widget.Button pos = dlg.getButton(
-                android.app.AlertDialog.BUTTON_POSITIVE);
-        if (pos != null) pos.setTextColor(DyColor.primary(this));
-    }
-
-    /** 确认完成后，后台自主决策是否生成技能卡 */
-    private void scheduleSkillCard(String goal, String history) {
-        final String hg = goal;
-        final String hh = history;
-        new Thread(() -> generateSkillCard(hg, hh,
-                SkillCardStore.SRC_AGENT, null)).start();
-    }
-
-    /**
-     * 技能卡生成：成功任务后调用。
-     * source=user（用户要求）或 agent（自主决策）。
-     */
-    private void generateSkillCard(String goal, String history, String source,
-                                   String preferName) {
-        try {
-            String prompt = "你是手机自动化助手。用户刚才完成了任务：\n目标："
-                    + goal + "\n过程：\n" + history
-                    + "\n\n请判断这个任务是否值得存为可复用的技能卡"
-                    + "（高频、步骤固定、有明确触发场景才值得）。"
-                    + "如果值得，输出纯 JSON：\n"
-                    + "{\"worth\":true,\"name\":\"简短名\","
-                    + "\"type\":\"script\"或\"skill\","
-                    + "\"trigger\":\"触发关键词，逗号分隔\","
-                    + "\"content\":\"script 为完整 shell 脚本；skill 为步骤 JSON\","
-                    + "\"summary\":\"一句话总结\"}\n"
-                    + "如果不值得，输出 {\"worth\":false}。只输出 JSON。";
-            LlmClient.Result r = llmStore.client().chat(prompt);
-            if (!r.ok) return;
-            org.json.JSONObject o = AgentLoop.extractJson(r.text);
-            if (o == null || !o.optBoolean("worth", false)) {
-                if (SkillCardStore.SRC_AGENT.equals(source)) {
-                    agentLog("📇 该任务不值得存为技能卡，已跳过");
-                }
-                return;
-            }
-            String name = (preferName != null && !preferName.isEmpty())
-                    ? preferName : o.optString("name", goal);
-            String type = o.optString("type", SkillCardStore.TYPE_SKILL);
-            if (!SkillCardStore.TYPE_SCRIPT.equals(type)) type = SkillCardStore.TYPE_SKILL;
-            new SkillCardStore(this).add(name, type, source,
-                    o.optString("trigger", ""), o.optString("content", ""),
-                    o.optString("summary", ""));
-            agentLog("📇 已生成技能卡：" + name
-                    + "（" + (SkillCardStore.TYPE_SCRIPT.equals(type) ? "脚本" : "技能")
-                    + "·" + (SkillCardStore.SRC_USER.equals(source) ? "用户" : "自主") + "）");
-        } catch (Exception e) {
-            agentLog("技能卡生成失败：" + e.getMessage());
-        }
-    }
-
-    /** 快捷指令：优先级最高，不经过大脑直接执行 */
-    private boolean handleSlashCmd(String cmd) {
-        switch (cmd) {
-            case "/stop":
-                agentStop = true;
-                agentLog("🛑 已强行停止");
-                FloatWindow.forceEnd();
-                stopInputFlow();
-                return true;
-            case "/clear":
-                if (chatStore != null) chatStore.newSession();
-                SharedMemory.clear(this);
-                clearChat();
-                agentLog("👋 对话已清空，在下方输入目标。");
-                return true;
-            case "/retry":
-                if (lastGoal.isEmpty()) {
-                    agentLog("没有可重试的任务");
-                } else {
-                    agentGoal.setText(lastGoal);
-                    agentLog("↻ 重试上次任务：" + lastGoal);
-                    startAgent();
-                }
-                return true;
-            case "/save": {
-                if (lastGoal.isEmpty()) {
-                    agentLog("没有可保存的任务");
-                } else {
-                    agentLog("📇 正在从上次任务生成技能卡…");
-                    final String fn = cmd.length() > 5 ? cmd.substring(5).trim() : "";
-                    final String fg = lastGoal;
-                    final String fh = lastHistory;
-                    new Thread(() -> generateSkillCard(fg, fh,
-                            SkillCardStore.SRC_USER, fn)).start();
-                }
-                return true;
-            }
-            case "/help":
-                agentLog("📖 快捷指令：\n/stop 强行停止\n/clear 清空对话\n"
-                        + "/retry 重试上次任务\n/save [名称] 存为技能卡\n/help 显示本帮助");
-                return true;
-            default:
-                return false;
-        }
-    }
-
-    // v2.88：发送后输入框保持焦点，不用重新点
-    private void refocusInput() {
-        if (agentGoal == null) return;
-        agentGoal.post(() -> {
-            agentGoal.requestFocus();
-            try {
-                android.view.inputmethod.InputMethodManager imm =
-                        (android.view.inputmethod.InputMethodManager)
-                                getSystemService(Context.INPUT_METHOD_SERVICE);
-                imm.showSoftInput(agentGoal,
-                        android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT);
-            } catch (Exception ignored) {
-            }
-        });
-    }
-
-    // v2.89：从服务商拉取模型列表（OpenAI 兼容 /v1/models）
-    private void fetchModels() {
-        String baseUrl = llmBaseUrl.getText().toString().trim();
-        String apiKey = llmApiKey.getText().toString().trim();
-        if (apiKey.isEmpty()) apiKey = llmStore.getApiKeyRaw();
-        if (baseUrl.isEmpty() || apiKey.isEmpty()) {
-            log("先填 base_url 和 api_key");
-            return;
-        }
-        // base_url 可能带 /v1 后缀，拼 /models 时处理
-        String url = baseUrl.endsWith("/") ? baseUrl + "models"
-                : baseUrl + "/models";
-        final String fUrl = url;
-        final String fKey = apiKey;
-        log("正在拉取模型列表...");
-        new Thread(() -> {
-            try {
-                java.net.URL u = new java.net.URL(fUrl);
-                java.net.HttpURLConnection c =
-                        (java.net.HttpURLConnection) u.openConnection();
-                c.setRequestMethod("GET");
-                c.setRequestProperty("Authorization", "Bearer " + fKey);
-                c.setConnectTimeout(15000);
-                c.setReadTimeout(15000);
-                int code = c.getResponseCode();
-                if (code != 200) {
-                    String msg = "HTTP " + code;
-                    try (java.io.InputStream es = c.getErrorStream()) {
-                        if (es != null) {
-                            byte[] buf = new byte[512];
-                            int n = es.read(buf);
-                            if (n > 0) msg += "：" + new String(buf, 0, n, "UTF-8");
-                        }
-                    } catch (Exception ignored) {}
-                    final String fMsg = msg;
-                    runOnUiThread(() -> log("拉取失败：" + fMsg));
-                    return;
-                }
-                StringBuilder sb = new StringBuilder();
-                try (java.io.BufferedReader br = new java.io.BufferedReader(
-                        new java.io.InputStreamReader(c.getInputStream(), "UTF-8"))) {
-                    String line;
-                    while ((line = br.readLine()) != null) sb.append(line);
-                }
-                org.json.JSONObject jo = new org.json.JSONObject(sb.toString());
-                org.json.JSONArray data = jo.optJSONArray("data");
-                if (data == null || data.length() == 0) {
-                    runOnUiThread(() -> log("模型列表为空"));
-                    return;
-                }
-                java.util.List<String> ids = new java.util.ArrayList<>();
-                for (int i = 0; i < data.length(); i++) {
-                    String id = data.optJSONObject(i).optString("id", "");
-                    if (!id.isEmpty()) ids.add(id);
-                }
-                java.util.Collections.sort(ids);
-                final String[] items = ids.toArray(new String[0]);
-                runOnUiThread(() -> {
-                    new AlertDialog.Builder(this)
-                            .setTitle("选择模型（" + items.length + " 个）")
-                            .setItems(items, (d, which) -> {
-                                llmModel.setText(items[which]);
-                                log("已选模型：" + items[which]);
-                            })
-                            .setNegativeButton("取消", null)
-                            .show();
-                });
-            } catch (Exception e) {
-                final String msg = e.getMessage();
-                runOnUiThread(() -> log("拉取失败：" + msg));
-            }
-        }).start();
-    }
-
-    // v3.19：辅助模型拉取模型 id 列表（OpenAI 兼容 /models）
-    private void auxFetchModels(EditText etBase, EditText etKey,
-                                EditText etModel) {
-        String baseUrl = etBase.getText().toString().trim();
-        String apiKey = etKey.getText().toString().trim();
-        if (baseUrl.isEmpty() || apiKey.isEmpty()) {
-            log("先填 base_url 和 api_key");
-            return;
-        }
-        String url = baseUrl.endsWith("/") ? baseUrl + "models"
-                : baseUrl + "/models";
-        final String fUrl = url;
-        final String fKey = apiKey;
-        log("正在拉取模型列表...");
-        new Thread(() -> {
-            try {
-                java.net.URL u = new java.net.URL(fUrl);
-                java.net.HttpURLConnection c =
-                        (java.net.HttpURLConnection) u.openConnection();
-                c.setRequestMethod("GET");
-                c.setRequestProperty("Authorization", "Bearer " + fKey);
-                c.setConnectTimeout(15000);
-                c.setReadTimeout(15000);
-                int code = c.getResponseCode();
-                if (code != 200) {
-                    String msg = "HTTP " + code;
-                    try (java.io.InputStream es = c.getErrorStream()) {
-                        if (es != null) {
-                            byte[] buf = new byte[512];
-                            int n = es.read(buf);
-                            if (n > 0) msg += "：" + new String(buf, 0, n, "UTF-8");
-                        }
-                    } catch (Exception ignored) {}
-                    final String fMsg = msg;
-                    runOnUiThread(() -> log("拉取失败：" + fMsg));
-                    return;
-                }
-                StringBuilder sb = new StringBuilder();
-                try (java.io.BufferedReader br = new java.io.BufferedReader(
-                        new java.io.InputStreamReader(c.getInputStream(), "UTF-8"))) {
-                    String line;
-                    while ((line = br.readLine()) != null) sb.append(line);
-                }
-                org.json.JSONObject jo = new org.json.JSONObject(sb.toString());
-                org.json.JSONArray data = jo.optJSONArray("data");
-                if (data == null || data.length() == 0) {
-                    runOnUiThread(() -> log("模型列表为空"));
-                    return;
-                }
-                java.util.List<String> ids = new java.util.ArrayList<>();
-                for (int i = 0; i < data.length(); i++) {
-                    String id = data.optJSONObject(i).optString("id", "");
-                    if (!id.isEmpty()) ids.add(id);
-                }
-                java.util.Collections.sort(ids);
-                final String[] items = ids.toArray(new String[0]);
-                runOnUiThread(() -> {
-                    new AlertDialog.Builder(this)
-                            .setTitle("选择模型（" + items.length + " 个）")
-                            .setItems(items, (d, which) -> {
-                                etModel.setText(items[which]);
-                                log("已选模型：" + items[which]);
-                            })
-                            .setNegativeButton("取消", null)
-                            .show();
-                });
-            } catch (Exception e) {
-                final String msg = e.getMessage();
-                runOnUiThread(() -> log("拉取失败：" + msg));
-            }
-        }).start();
-    }
 
     // v2.93：查看任务日志列表
-    // v3.11 Issue 8：记忆列表（可逐条删/一键清空）
-    private void showMemoryList() {
-        java.util.Map<String, String> mems = UserMemory.listAll(this);
-        if (mems.isEmpty()) {
-            log("暂无记忆");
-            return;
-        }
-        String[] keys = mems.keySet().toArray(new String[0]);
-        String[] items = new String[keys.length];
-        for (int i = 0; i < keys.length; i++) {
-            String v = mems.get(keys[i]);
-            items[i] = keys[i] + "："
-                    + (v.length() > 30 ? v.substring(0, 30) + "…" : v);
-        }
-        new android.app.AlertDialog.Builder(this)
-                .setTitle("🧠 记忆（" + keys.length + " 条）")
-                .setItems(items, (d, which) -> {
-                    String k = keys[which];
-                    new android.app.AlertDialog.Builder(this)
-                            .setTitle(k)
-                            .setMessage(mems.get(k))
-                            .setPositiveButton("删除", (d2, w2) -> {
-                                UserMemory.remove(this, k);
-                                log("已删除记忆：" + k);
-                                showMemoryList();
-                            })
-                            .setNegativeButton("关闭", null)
-                            .show();
-                })
-                .setNeutralButton("清空全部", (d, w) -> {
-                    new android.app.AlertDialog.Builder(this)
-                            .setTitle("清空全部记忆？")
-                            .setPositiveButton("清空", (d2, w2) -> {
-                                UserMemory.clearAll(this);
-                                log("已清空全部记忆");
-                            })
-                            .setNegativeButton("取消", null)
-                            .show();
-                })
-                .setNegativeButton("关闭", null)
-                .show();
-    }
 
     private void showTaskLogs() {
         java.io.File[] logs = TaskRunLogger.listLogs(this);
@@ -1114,520 +484,6 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void startAgent() {
-        String goal = agentGoal.getText().toString().trim();
-        if (goal.isEmpty()) {
-            log("先输入目标");
-            return;
-        }
-        // 快捷指令优先级最高
-        if (goal.startsWith("/")) {
-            agentGoal.setText("");
-            String cmd = goal.split("\\s+")[0].toLowerCase();
-            if (!handleSlashCmd(cmd)) {
-                agentLog("未知指令：" + cmd + "，输入 /help 查看");
-            }
-            return;
-        }
-        // v3.29：三端统一原则——执行中反馈、零token直达都不需要 Key/无障碍，先行处理；
-        // 无障碍不再做硬门：root 优先，无 root 又无无障碍时只警告、仍放行（与 TG 一致）
-        if (agentThread != null && agentThread.isAlive()) {
-            // 执行中发消息 = 指出问题，注入为实时反馈
-            feedbackQueue.offer(goal);
-            agentGoal.setText("");
-            refocusInput();
-            agentLog("💬 已收到你的补充说明，智能体下一步会参考");
-            return;
-        }
-        agentGoal.setText("");
-        refocusInput();
-        // 高频意图本地路由：零 token 直达，不烧大模型，不查 Key/权限
-        LocalIntentRouter.RouteResult localRr = null;
-        try {
-            localRr = LocalIntentRouter.tryRoute(this, goal);
-        } catch (Exception ignored) {
-        }
-        if (localRr != null) {
-            agentLog((localRr.handled ? "✅ " : "⚠️ ") + localRr.message);
-            if (localRr.handled) {
-                // v3.51 步骤5：本地路由决策点打点（零 token 直达）
-                Telemetry.decisionPoint(this, "app", "local_route", 1.0,
-                        goal, "local_route", 1.0, null);
-                historyStore.append("⚡本地：" + goal, true);
-                runOnUiThread(this::refreshHistory);
-                return;
-            }
-        } else {
-            try {
-                org.json.JSONObject rd = new org.json.JSONObject();
-                rd.put("goal", goal);
-                Telemetry.event(this, "app", "router_miss", rd);
-            } catch (Exception ignored) {
-            }
-        }
-        if (!llmStore.hasKey()) {
-            log("先在「云端大模型」配置 API Key");
-            return;
-        }
-        if (!AgentAccessibilityService.isRunning() && Root.findSu() == null) {
-            agentLog("⚠️ 无障碍未开启且无 root，屏幕操控不可用；涉及看屏/点击的任务会受限");
-        }
-        // v2.82：纯聊天不走任务流，直接对话回复
-        // v3.02：真流式输出
-        if (LocalIntentRouter.isChat(goal)) {
-            try {
-                org.json.JSONObject cd = new org.json.JSONObject();
-                cd.put("text", goal);
-                Telemetry.event(this, "app", "chat", cd);
-            } catch (Exception ignored) {
-            }
-            agentGoal.setText("");
-            refocusInput();
-            final String chatGoal = goal;
-            agentLog("💬 " + chatGoal);
-            final LlmClient.StreamHandle chatHandle = new LlmClient.StreamHandle();
-            chatStreamHandle = chatHandle;
-            chatThread = new Thread(() -> {
-                LlmClient llm = new LlmClient(llmStore.getBaseUrl(),
-                        llmStore.getApiKeyRaw(), llmStore.getModel());
-                String prompt = "你是GSIC，一个友好、简洁的手机助手。用户说：" + chatGoal
-                        + "\n用一句话友好回应，如果用户没说具体要做什么，问他想让我干什么。不要输出JSON。"
-                        + "【重要】你现在是纯聊天模式、没有任何操作手机的工具，绝不能声称已经帮用户"
-                        + "打开/关闭/设置/发送/删除了任何东西；如果用户是在让你操作手机，"
-                        + "直接告诉他：把这条单独发给我，我按任务执行。"; prompt = prompt + TermsGate.CORE_TEXT;
-                final TextView tv = startStreamBubble();
-                final StringBuilder full = new StringBuilder();
-                LlmClient.Result r = llm.chatStream(prompt, token -> {
-                    full.append(token);
-                    if (tv != null) {
-                        final String t = token;
-                        runOnUiThread(() -> {
-                            tv.append(t);
-                            if (agentScrollView != null && SettingRegistry.getBool(this, "agent.chat_follow", true) && agentScrollView.isAtBottom()) {
-                                agentScrollView.post(() -> agentScrollView.fullScroll(
-                                        android.view.View.FOCUS_DOWN));
-                            }
-                        });
-                    }
-                }, chatHandle);
-                chatThread = null;
-                chatStreamHandle = null;
-                if (!r.ok) {
-                    if (r.text != null && r.text.contains("已取消")) {
-                        // 真取消：保留已输出的片段，只补停止标记，不覆写、不存历史
-                        runOnUiThread(() -> {
-                            if (tv != null) tv.append("（已停止）");
-                        });
-                        return;
-                    }
-                    final String err = "出错了：" + r.text;
-                    runOnUiThread(() -> {
-                        if (tv != null) tv.setText("🤖 " + err);
-                        else agentLog("🤖 " + err);
-                    });
-                } else {
-                    // 存入历史
-                    final String reply = full.toString();
-                    runOnUiThread(() -> {
-                        if (chatStore != null) {
-                            String time = new java.text.SimpleDateFormat("HH:mm",
-                                    java.util.Locale.getDefault())
-                                    .format(new java.util.Date());
-                            chatStore.append("agent", reply, time);
-                        }
-                    });
-                }
-            });
-            chatThread.start();
-            return;
-        }
-        // 不再自动新开对话：保留上下文，历史消息即上下文
-        // 用户点"新对话"按钮才开新会话
-        clearChat();
-        final long taskStartMs = System.currentTimeMillis();
-        lastGoal = goal;
-        agentStop = false;
-        final String taskGoal = goal;
-        // 运行记录：创建进行中条目
-        final long histId = historyStore.startTask(taskGoal);
-        runOnUiThread(this::refreshHistory);
-        agentThread = new Thread(() -> {
-            boolean confirmedDone = false;
-            boolean stopped = false;
-            String supFeedback = "";
-            try {
-                // v3.51：App 通道任务登记（此前 App 任务不登记，流光无自愈、
-                // 丢了全程黑）——与线程 finally 的 endTask 配对，监管多轮
-                // 期间 AgentLoop 的登记嵌套在内，计数不归零不熄灯
-                FloatWindow.beginTask(this, "🎯 " + taskGoal);
-                // 悬浮窗权限：没有就先提示一次
-                if (!FloatWindow.hasPermission(this)) {
-                    runOnUiThread(() -> android.widget.Toast.makeText(this,
-                            "开启悬浮窗权限可在后台看进度", android.widget.Toast.LENGTH_LONG).show());
-                }
-                final int MAX_SUP_ROUNDS = 2; // 监管者最多要求继续 2 轮
-                final AgentLoop[] loopRef = new AgentLoop[1];
-                String lastMissing = "";
-                int stepBudget = AgentLoop.NO_LIMIT;
-
-                // ===== 对话上下文（最近 6 条，裁剪） =====
-                String convCtx = "";
-                try {
-                    java.util.List<ChatStore.Msg> allMsgs = chatStore.currentMsgs();
-                    StringBuilder cb = new StringBuilder();
-                    int start = Math.max(0, allMsgs.size() - 6);
-                    for (int ci = start; ci < allMsgs.size(); ci++) {
-                        ChatStore.Msg cm = allMsgs.get(ci);
-                        String role = "user".equals(cm.role) ? "用户"
-                                : "agent".equals(cm.role) ? "助手" : "系统";
-                        String txt = cm.text.length() > 80
-                                ? cm.text.substring(0, 80) + "…" : cm.text;
-                        cb.append(role).append("：").append(txt).append("\n");
-                    }
-                    convCtx = cb.toString().trim();
-                } catch (Exception ignored) {
-                }
-                final String fCtx = convCtx;
-
-                // ===== 思考者规划阶段 =====
-                String thinkerPlanText = "";
-                Thinker.Plan tPlan = null;
-                agentLog("🧠 思考者规划中…");
-                try {
-                    java.util.List<AgentAccessibilityService.NodeInfo> pNodes =
-                            AgentAccessibilityService.dumpScreen();
-                    String pScreen = pNodes.isEmpty()
-                            ? "(读屏为空)" : AgentLoop.serialize(pNodes);
-                    tPlan = Thinker.plan(agentClient(), taskGoal, pScreen);
-                    if (tPlan.ok) {
-                        thinkerPlanText = tPlan.toText();
-                        agentLog("🧠 思考者规划：\n" + thinkerPlanText);
-                    } else {
-                        agentLog("🧠 思考者规划失败，直接执行");
-                    }
-                } catch (Exception e) {
-                    agentLog("🧠 思考者异常：" + e.getMessage());
-                }
-                final String fPlan = thinkerPlanText;
-                final java.util.List<String> fSteps =
-                        (tPlan != null && tPlan.steps != null)
-                        ? new java.util.ArrayList<>(tPlan.steps)
-                        : new java.util.ArrayList<String>();
-
-                int totalSteps = 0;
-                int lastProgressPct = -1;
-                int completedRounds = 0;
-                // 审计：跨监管轮次累加每步动作明细
-                final org.json.JSONArray auditAll = new org.json.JSONArray();
-                for (int supRound = 0; ; supRound++) {
-                    // ===== 执行阶段（含失败后台重试） =====
-                    boolean finalDone = false;
-                    int maxRetry = 2;
-                    for (int attempt = 0; attempt <= maxRetry; attempt++) {
-                        if (agentStop) break;
-                        if (attempt > 0) {
-                            agentLog("↻ 后台重试第 " + attempt + " 次…");
-                        }
-                        final boolean isContinue = supRound > 0;
-                        // v3.51：不再每轮 hide+重加（闪烁且一次失败就丢窗），
-                        // 改断言补窗——窗在就不动，缺了才补
-                        runOnUiThread(FloatWindow::assertShown);
-                        runOnUiThread(this::startInputFlow);
-                        behaviorLog.user("启动智能体任务", taskGoal);
-                        behaviorLog.app("智能体开始执行",
-                                "模型=" + (agentModelOverride.isEmpty()
-                                ? llmStore.getModel() : agentModelOverride));
-                        AgentLoop loop = new AgentLoop(this, agentClient(),
-                                new AgentLoop.Listener() {
-                                    @Override
-                                    public void onLog(String msg) {
-                                        // v2.62：监管者消息分流到独立输出区
-                                        if (msg.startsWith("🔍")
-                                                || msg.contains("监管者")) {
-                                            supervisorLog(msg);
-                                        } else {
-                                            agentLog(msg);
-                                        }
-                                        // 悬浮窗流式显示思考与执行过程
-                                        String line = null;
-                                        if (msg.startsWith("🤔")) {
-                                            line = msg.length() > 22
-                                                    ? msg.substring(0, 22) + "…"
-                                                    : msg;
-                                        } else if (msg.startsWith("💭")) {
-                                            String body = msg.substring(2).trim();
-                                            line = "💭 "
-                                                    + (body.length() > 20
-                                                            ? body.substring(0, 20) + "…"
-                                                            : body);
-                                        } else if (msg.startsWith("🖐")) {
-                                            String body = msg.substring(2).trim();
-                                            line = "🖐 "
-                                                    + (body.length() > 20
-                                                            ? body.substring(0, 20) + "…"
-                                                            : body);
-                                        } else if (msg.startsWith("🔍")
-                                                || msg.startsWith("🔁")
-                                                || msg.startsWith("🧠")) {
-                                            line = msg.length() > 22
-                                                    ? msg.substring(0, 22) + "…"
-                                                    : msg;
-                                        }
-                                        if (line != null) FloatWindow.pushLine(line);
-                                    }
-
-                                    @Override
-                                    public boolean isStopped() {
-                                        return agentStop;
-                                    }
-
-                                    @Override
-                                    public boolean askContinue(String reason) {
-                                        return askUserContinue(reason);
-                                    }
-                                });
-                        loop.setAllowAdvanced(agentAdvBox != null && agentAdvBox.isChecked());
-                        loop.setSupervisorEnabled(agentSupervisorBox != null
-                                && agentSupervisorBox.isChecked());
-                        loop.setSupervisorClient(llmStore.supervisorClient());
-                        // 风险审批：编译期分级 + 用户策略，本地弹窗确认
-                        loop.setRiskPolicy(riskPolicy);
-                        loop.setApprover(MainActivity.this::askUserApprove);
-                        loop.setRemote(false);
-                        loop.setChannel("app");
-                        if (!fCtx.isEmpty()) loop.setConversationContext(fCtx);
-                        String profTxt = userProfile.describeForPrompt();
-                        if (!profTxt.isEmpty()) loop.setConversationContext(
-                                fCtx.isEmpty() ? profTxt : fCtx + "\n" + profTxt);
-                        // v3.44：一份共享记忆——叠加三端共用轮次
-                        String sharedCtx = SharedMemory.recentText(this, 3);
-                        if (!sharedCtx.isEmpty()) {
-                            String base = fCtx.isEmpty() ? "" : fCtx + "\n";
-                            String prof = profTxt.isEmpty()
-                                    ? "" : "\n" + profTxt;
-                            loop.setConversationContext(
-                                    base + sharedCtx + prof);
-                        }
-                        if (!fPlan.isEmpty()) loop.setPlan(fPlan);
-                        if (!fSteps.isEmpty()) loop.setTodoSteps(fSteps);
-                        if (!supFeedback.isEmpty()) loop.setSupervisorFeedback(supFeedback);
-                        loop.setFeedbackSupplier(() -> feedbackQueue.poll());
-                        loopRef[0] = loop;
-                        // v3.50 第 3 步：低置信拦截——loop.run() 被拦截时弹选项对话框，
-                        // 用户点选后把选项拼回 goal 重跑（最多澄清 2 轮；取消则停任务）
-                        String execGoal = taskGoal;
-                        int clarifyRounds = 0;
-                        finalDone = false;
-                        while (!agentStop) {
-                            final String g = execGoal;
-                            finalDone = loop.run(g, stepBudget);
-                            if (!loop.needsClarify()) break;
-                            if (clarifyRounds >= 2) {
-                                agentLog("❓ 已澄清 2 轮仍低置信，停止（请换个说法再试）");
-                                break;
-                            }
-                            clarifyRounds++;
-                            String clarified = askClarifyGoal(g, loop);
-                            if (clarified == null) {
-                                agentLog("❓ 用户取消澄清，任务停止");
-                                break;
-                            }
-                            execGoal = clarified;
-                            agentLog("❓ 澄清后重跑：" + execGoal);
-                        }
-                        if (finalDone || agentStop) break;
-                        if (attempt < maxRetry) {
-                            try {
-                                Thread.sleep(3000);
-                            } catch (InterruptedException e) {
-                                Thread.currentThread().interrupt();
-                                break;
-                            }
-                        }
-                    }
-                    // 审计：收拢本轮每步明细（停止时也要留档）
-                    try {
-                        org.json.JSONArray part = new org.json.JSONArray(
-                                loopRef[0] != null
-                                        ? loopRef[0].getAuditJson() : "[]");
-                        for (int pi = 0; pi < part.length(); pi++) {
-                            org.json.JSONObject po = part.getJSONObject(pi);
-                            po.put("round", supRound + 1);
-                            auditAll.put(po);
-                        }
-                    } catch (Exception ignored) {
-                    }
-                    if (agentStop) {
-                        stopped = true;
-                        break;
-                    }
-                    lastHistory = loopRef[0] != null
-                            ? loopRef[0].getLastHistory() : "";
-                    // 累加步数
-                    if (lastHistory != null) {
-                        for (String hl : lastHistory.split("\n")) {
-                            if (hl.startsWith("第") && hl.contains("步：")) {
-                                totalSteps++;
-                            }
-                        }
-                    }
-                    completedRounds = supRound + 1;
-
-                    // ===== 监管者复核阶段 =====
-                    boolean supOn = agentSupervisorBox != null
-                            && agentSupervisorBox.isChecked();
-                    if (!supOn) {
-                        // 未开启监管者：以执行者为准
-                        confirmedDone = finalDone;
-                        if (finalDone) scheduleSkillCard(taskGoal, lastHistory);
-                        break;
-                    }
-                    supervisorLog("🔍 监管者复核中…");
-                    Supervisor.Verdict verdict = new Supervisor.Verdict();
-                    try {
-                        java.util.List<AgentAccessibilityService.NodeInfo> fNodes =
-                                AgentAccessibilityService.dumpScreen();
-                        String fScreen = fNodes.isEmpty()
-                                ? "(读屏为空)" : AgentLoop.serialize(fNodes);
-                        // v3.50 意图层：终审判据绑定——把任务书传给监管者，只按任务书完成判据裁决
-                        verdict = Supervisor.review(llmStore.supervisorClient(), taskGoal,
-                                finalDone, lastHistory, fScreen, null,
-                                loopRef[0] != null ? loopRef[0].getTaskBook() : null);
-                    } catch (Exception e) {
-                        supervisorLog("🔍 监管者复核异常：" + e.getMessage());
-                    }
-                    supervisorLog(Supervisor.conclude(finalDone, verdict));
-                    if (verdict.ok) lastProgressPct = verdict.progressPct;
-
-                    if (verdict.ok && verdict.completed) {
-                        confirmedDone = true;
-                        scheduleSkillCard(taskGoal, lastHistory);
-                        break;
-                    }
-                    if (!verdict.ok) {
-                        confirmedDone = finalDone; // 复核失败，信任执行者
-                        if (finalDone) scheduleSkillCard(taskGoal, lastHistory);
-                        break;
-                    }
-                    // 未完成：先看是不是卡住了（同一问题连续两轮）
-                    if (supRound > 0 && Supervisor.isStuck(lastMissing, verdict.missing)) {
-                        supervisorLog("🔍 监管者：连续两轮卡在同一问题（"
-                                + verdict.missing + "），停手以免浪费 token，"
-                                + "建议人工查看");
-                        confirmedDone = false;
-                        break;
-                    }
-                    lastMissing = verdict.missing;
-                    if (supRound >= MAX_SUP_ROUNDS) {
-                        supervisorLog("🔍 监管者：已达最大复核轮数，不再继续");
-                        confirmedDone = false;
-                        break;
-                    }
-                    // v3.34：步数不设限，监管者只给反馈、不再砍步数
-                                        supFeedback = Supervisor.buildFeedback(verdict);
-                    agentLog("🔁 监管者：完成度约 " + verdict.progressPct + "%，需要继续执行（第 " + (supRound + 2) + " 轮）…");
-                }
-
-                stopped = agentStop;
-                long usedSec = (System.currentTimeMillis() - taskStartMs) / 1000;
-                String resultDetail = "用时" + usedSec + "秒";
-                // 运行记录：丰富执行情况（步数/监管轮数/完成度）
-                String richDetail = resultDetail
-                        + " · " + totalSteps + "步"
-                        + " · 监管" + completedRounds + "轮"
-                        + (lastProgressPct >= 0
-                                ? " · 完成度" + lastProgressPct + "%" : "");
-                // v3.44：一份共享记忆——App 这一轮也写进三端共用轮次
-                // v3.45：结果尾巴三端对齐——带上用时/步数/监管/完成度明细
-                SharedMemory.addRound(this, "app", taskGoal,
-                        (confirmedDone ? "任务完成"
-                                : (stopped ? "被手动停止" : "任务未完成"))
-                                + "，" + richDetail);
-                if (confirmedDone) {
-                    agentLog("🎉 任务完成（监管者已确认）");
-                    // v3.08：任务完成给日志入口（用户在玩时点开看，不在时只存文件）
-                    final String logPath = loopRef[0] != null
-                            ? loopRef[0].getTaskLogPath() : null;
-                    if (logPath != null) {
-                        runOnUiThread(() -> showTaskLogButton(logPath));
-                    }
-                    runOnUiThread(() -> android.widget.Toast.makeText(this,
-                            "✅ 任务已完成", android.widget.Toast.LENGTH_LONG).show());
-                    historyStore.finishTask(histId, taskGoal, true,
-                            richDetail + " · 已确认");
-                } else if (stopped) {
-                    agentLog("⏹ 已停止");
-                    historyStore.finishTask(histId, taskGoal, false,
-                            richDetail + " · 手动停止");
-                } else {
-                    agentLog("❌ 任务未完成");
-                    runOnUiThread(() -> android.widget.Toast.makeText(this,
-                            "任务未完成，监管者已复核", android.widget.Toast.LENGTH_LONG).show());
-                    historyStore.finishTask(histId, taskGoal, false,
-                            richDetail + " · 未完成");
-                }
-                runOnUiThread(this::refreshHistory);
-                // v4.14 补（用户 11-03 亲定）：App 通道跳出任务结束
-                // 回 GSIC 主页——AgentLoop finally 里 App 通道故意
-                // 没清跳出标记，留到这里消费：横屏切主页即横屏
-                // 模式（左虚拟屏 + 右工具 + 底部输入框），竖屏切
-                // 主页即主页菜单；没跳出的任务不受影响。
-                try {
-                    boolean jumped = getSharedPreferences("agent", MODE_PRIVATE)
-                            .getBoolean("task_jumped_out", false);
-                    if (jumped) {
-                        getSharedPreferences("agent", MODE_PRIVATE)
-                                .edit().putBoolean("task_jumped_out", false).apply();
-                        runOnUiThread(() -> {
-                            try { showPage(0); } catch (Exception ignored) {}
-                        });
-                        agentLog("跳出任务结束，已回 GSIC 主页");
-                    }
-                } catch (Exception ignored) {}
-                // 审计明细入库
-                if (auditAll.length() > 0) {
-                    historyStore.setSteps(histId, auditAll.toString());
-                }
-                // 不定时自动总结用户画像：每 3 个任务一次，后台执行
-                try {
-                    int done = getSharedPreferences("profile", MODE_PRIVATE)
-                            .getInt("task_count", 0) + 1;
-                    getSharedPreferences("profile", MODE_PRIVATE).edit()
-                            .putInt("task_count", done).apply();
-                    if (done % 3 == 0) {
-                        new Thread(() -> {
-                            summarizeUserProfile();
-                            runOnUiThread(this::renderUserProfile);
-                        }).start();
-                    }
-                } catch (Exception ignored) {
-                }
-            } catch (Exception e) {
-                agentLog("异常：" + e.getMessage());
-            } finally {
-                TaskLock.release("app"); // v3.32：三通道互斥释放
-                runOnUiThread(() -> {
-                    FloatWindow.endTask("");
-                    stopInputFlow();
-                    if (agentSendBtn != null) agentSendBtn.setText("发送");
-                });
-            }        }, "agent-loop");
-        // v3.32：三通道真互斥——TG/远控占用时不并发抢屏
-        if (!TaskLock.tryAcquire("app")) {
-            agentLog("⏳ 任务忙（" + TaskLock.current() + " 通道正在执行），请稍后再试");
-            return;
-        }
-        try {
-            agentThread.start();
-        } catch (Exception e) {
-            TaskLock.release("app");
-            throw e;
-        }
-        runOnUiThread(() -> {
-            if (agentSendBtn != null) agentSendBtn.setText("停止");
-        });
-        agentLog("▶ 开始执行（可点停止）");
-    }
 
     private String localIps() {
         StringBuilder sb = new StringBuilder();
@@ -1659,8 +515,6 @@ public class MainActivity extends Activity {
     // 竖屏主页保持原菜单/详情不变；横屏主页只显示这两个窗格。
     private LinearLayout homeLandWrap;
     private LinearLayout homeLandOuter;
-    private EditText homeLandInput;
-    private Button homeLandSendBtn;
     private android.widget.ImageView homeVdView;
     private TextView homeVdStatus;
     private LinearLayout homeVdStandby;
@@ -1672,9 +526,10 @@ public class MainActivity extends Activity {
     private android.graphics.Bitmap homeVdLastBmp;
     private long homeVdLastVer = -1;
     private long homeToolLastVer = -1;
-    // v4.06 修正：初始值不能是 -1，否则 history.json 不存在时
-    // （mod 也是 -1）首刷会被误判“没变”而右边一直空白。
-    private long homeHistLastMod = -2;
+    // v4.06 修正：初始值不能是 0，否则无日志时（mod 也是 0）
+    // 首刷会被误判“没变”而右边一直空白。
+    private long homeLogLastMod = -2;
+    private int homeLogCount = -1;
     private String homeLastRunKey = "";
     private boolean homeRightIsStandby = false;
     private final android.os.Handler homeLandHandler =
@@ -1715,7 +570,7 @@ public class MainActivity extends Activity {
             // 左边显示最近运行过的软件图标，右边显示最近任务日志。
             // 虚拟屏运行时则左边实时画面（24fps 对帧）、右边当前任务工具代码。
             if (VirtualDisplayManager.isActive()) {
-                if (homeToolTitle != null) homeToolTitle.setText("智能体工具与代码");
+                if (homeToolTitle != null) homeToolTitle.setText("工具与代码");
                 if (homeVdStandby != null) homeVdStandby.setVisibility(View.GONE);
                 if (homeVdView != null) homeVdView.setVisibility(View.VISIBLE);
                 long ver = VirtualDisplayManager.lastFrameVersion();
@@ -1748,7 +603,7 @@ public class MainActivity extends Activity {
                     homeToolLastVer = tv;
                     if (homeToolView != null) {
                         if (AgentToolLog.isEmpty()) {
-                            homeToolView.setText("智能体尚未调用工具\n任务开始后，这里实时显示每次调用的工具名、参数代码与结果。");
+                            homeToolView.setText("尚未调用工具\n任务开始后，这里实时显示每次调用的工具名、参数代码与结果。");
                         } else {
                             homeToolView.setText(AgentToolLog.getText());
                         }
@@ -1770,24 +625,6 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {}
     }
 
-    // v4.14 横屏主页输入框发送：把文字喂给智能体页同一入口
-    // startAgent（斜杠指令、本地路由、执行中补充说明都复用），
-    // 发完把焦点还给主页输入框——startAgent 内部会 refocus 到
-    // 智能体页输入框（横屏主页里不可见），300ms 后主页输入框
-    // 再抢回焦点，用户可以连续下命令，不用重新点输入框。
-    private void sendHomeLandGoal() {
-        if (homeLandInput == null || agentGoal == null) return;
-        String goal = homeLandInput.getText().toString().trim();
-        if (goal.isEmpty()) return;
-        homeLandInput.setText("");
-        agentGoal.setText(goal);
-        startAgent();
-        if (homeLandInput != null) {
-            homeLandInput.postDelayed(() -> {
-                try { homeLandInput.requestFocus(); } catch (Exception ignored) {}
-            }, 300);
-        }
-    }
 
     // v4.14 左窗触点换算：homeVdView 是 FIT_CENTER，虚拟屏帧
     // 720x1280 按比例贴合、居中留黑边，触点先扣黑边再按比例
@@ -1869,7 +706,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    // 左待机：最近运行过的软件图标与名字（智能体成功启动过的那个）。
+    // 左待机：最近运行过的软件图标与名字（任务成功启动过的那个）。
     private void refreshVdStandbyLeft() {
         try {
             android.content.SharedPreferences sp =
@@ -1882,7 +719,7 @@ public class MainActivity extends Activity {
             if (pkg.isEmpty()) {
                 if (homeVdIcon != null) homeVdIcon.setImageDrawable(null);
                 if (homeVdAppName != null) {
-                    homeVdAppName.setText("暂无最近运行的软件\n智能体成功启动过的软件会显示在这里");
+                    homeVdAppName.setText("暂无最近运行的软件\n任务成功启动过的软件会显示在这里");
                 }
                 if (homeVdStatus != null) {
                     homeVdStatus.setText("虚拟屏待机 · 无任务运行");
@@ -1912,50 +749,43 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {}
     }
 
-    // 右待机：最近运行过的任务日志（HistoryStore 已按最新在前排好），
-    // 取前 5 条；末尾一行是规则待机思考，不是模型调用——
-    // 模型待机思考会一直烧 Key，本版不做，需要再单独做带开关与间隔的待机思考循环。
+    // 右待机：最近的任务日志（TaskRunLogger.listLogs 已按最新在前排好），
+    // 取前 5 条；原运行记录存储已随智能体删除。
+    // 末尾一行是规则待机思考，不是模型调用——模型待机思考会一直烧
+    // Key，本版不做，需要再单独做带开关与间隔的待机思考循环。
     private void refreshVdStandbyRight() {
         try {
-            java.io.File hf = new java.io.File(getFilesDir(), "history.json");
-            long mod = hf.exists() ? hf.lastModified() : -1;
-            if (mod == homeHistLastMod) return;
-            homeHistLastMod = mod;
-            java.util.List<HistoryStore.Entry> list =
-                    new HistoryStore(this).list();
+            java.io.File[] logs = TaskRunLogger.listLogs(this);
+            long mod = 0;
+            for (java.io.File f : logs) {
+                if (f.lastModified() > mod) mod = f.lastModified();
+            }
+            if (mod == homeLogLastMod && logs.length == homeLogCount) return;
+            homeLogLastMod = mod;
+            homeLogCount = logs.length;
             StringBuilder sb = new StringBuilder();
-            if (list.isEmpty()) {
+            if (logs.length == 0) {
                 sb.append("暂无运行过的任务\n");
             } else {
-                int n = Math.min(5, list.size());
+                int n = Math.min(5, logs.length);
                 for (int i = 0; i < n; i++) {
-                    HistoryStore.Entry e = list.get(i);
-                    String mark = "running".equals(e.status) ? "🟢 进行中"
-                            : (e.ok ? "✓ 完成" : "✗ 失败");
-                    String title = e.title == null || e.title.isEmpty()
-                            ? "(空)" : e.title;
-                    if (title.length() > 30) title = title.substring(0, 30) + "…";
-                    sb.append(mark).append(" ").append(title).append("\n");
-                    sb.append(e.timeStr == null ? "" : e.timeStr);
-                    if (e.detail != null && !e.detail.isEmpty()) {
-                        sb.append(" · ").append(e.detail);
-                    }
-                    sb.append("\n\n");
+                    // task_20261019_141530_ab12.log -> 2026-10-19 14:15:30
+                    String nm = logs[i].getName().replace("task_", "").replace(".log", "");
+                    String t = nm.length() >= 15
+                            ? nm.substring(0, 4) + "-" + nm.substring(4, 6) + "-" + nm.substring(6, 8)
+                            + " " + nm.substring(9, 11) + ":" + nm.substring(11, 13) + ":" + nm.substring(13, 15)
+                            : nm;
+                    sb.append("📝 ").append(t).append("\n\n");
                 }
             }
-            // 规则待机思考：从最近一条任务状态推一条待机建议，不调模型。
-            if (!list.isEmpty()) {
-                HistoryStore.Entry last = list.get(0);
-                sb.append("待机思考：");
-                if ("running".equals(last.status)) {
-                    sb.append("上次任务还在跑，待机中继续等它结束。");
-                } else if (last.ok) {
-                    sb.append("上次任务已完成，待机中无新任务。");
-                } else {
-                    sb.append("上次任务未完成，待机时可准备重试或换个方法。");
-                }
-                sb.append("\n");
+            // 规则待机思考：不调模型，只按有无日志给一条待机提示。
+            sb.append("待机思考：");
+            if (logs.length == 0) {
+                sb.append("暂无任务记录，待机中等待新任务。");
+            } else {
+                sb.append("最近任务已记入日志，待机中无新任务。");
             }
+            sb.append("\n");
             if (homeToolView != null) homeToolView.setText(sb.toString());
             if (homeToolScroll != null) {
                 homeToolScroll.post(() -> homeToolScroll.fullScroll(
@@ -1967,11 +797,8 @@ public class MainActivity extends Activity {
     private LinearLayout buildHomePage() {
         homeSections = new java.util.HashMap<>();
         homeSections.put("status", buildStatusCard());
-        homeSections.put("llm", buildLlmCard());
-        homeSections.put("ask", buildAskCard());
         homeSections.put("skill", buildSkillCard());
         homeSections.put("sched", buildSchedCard());
-        homeSections.put("hist", buildHistCard());
 
         LinearLayout outer = new LinearLayout(this);
         outer.setOrientation(LinearLayout.VERTICAL);
@@ -1982,18 +809,10 @@ public class MainActivity extends Activity {
         LinearLayout homeList = menuCard();
         addMenuRow(homeList, "📊", "状态", "无障碍权限与服务状态",
                 v -> showHomeSection("status"));
-        addMenuRow(homeList, "🧠", "大模型配置", "服务商、Key 与连接测试",
-                v -> showHomeSection("llm"));
-        addMenuRow(homeList, "💬", "问答测试", "快速验证大模型连通与回答",
-                v -> showHomeSection("ask"));
         addMenuRow(homeList, "🛠️", "技能", "本地技能中心",
                 v -> showHomeSection("skill"));
         addMenuRow(homeList, "⏰", "定时任务", "本地定时调度",
                 v -> showHomeSection("sched"));
-        addMenuRow(homeList, "📝", "运行记录", "任务执行历史",
-                v -> showHomeSection("hist"));
-        addMenuRow(homeList, "🧠", "智能沉淀", "运行数据汇总报告，分享给 Muse 分析更新",
-                v -> showSediment());
         menu.addView(homeList);
 
         homeMenuScroll = new ScrollView(this);
@@ -2058,7 +877,7 @@ public class MainActivity extends Activity {
         toolPane.setOrientation(LinearLayout.VERTICAL);
         toolPane.setPadding(dp(8), dp(8), dp(8), dp(8));
         homeToolTitle = new TextView(this);
-        homeToolTitle.setText("智能体工具与代码");
+        homeToolTitle.setText("工具与代码");
         homeToolTitle.setTextSize(16);
         homeToolTitle.setPadding(dp(4), dp(4), dp(4), dp(8));
         toolPane.addView(homeToolTitle);
@@ -2074,51 +893,6 @@ public class MainActivity extends Activity {
                 0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
         homeLandOuter.addView(homeLandWrap, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
-        // v4.14 横屏主页智能体输入框：主页就能下命令，不用切智能体页。
-        // 发送复用 startAgent（智能体页同一入口）：任务跑起来后，
-        // 右边工具日志实时显示，智能体页的对话日志仍可切过去看。
-        // v4.15（用户 11-03 亲定“输入框在右半边显示”）：输入框
-        // 不再通栏放底部，改放右窗（工具日志窗）底部——左边是
-        // 虚拟屏、右边是智能体，输入框跟智能体在同一边；右窗
-        // 是竖向布局（标题、滚动日志占权重、输入框贴底），
-        // 窗口 adjustResize 时键盘顶起，输入框自然跟到键盘上方。
-        LinearLayout landInputBar = new LinearLayout(this);
-        landInputBar.setOrientation(LinearLayout.HORIZONTAL);
-        landInputBar.setGravity(Gravity.CENTER_VERTICAL);
-        landInputBar.setBackground(bubbleBg(DyColor.surfaceVariant(this), 24));
-        landInputBar.setPadding(dp(6), dp(6), dp(6), dp(6));
-        homeLandInput = new EditText(this);
-        homeLandInput.setHint("在主页给智能体下命令");
-        homeLandInput.setTextSize(14);
-        homeLandInput.setSingleLine(true);
-        homeLandInput.setBackground(null);
-        homeLandInput.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_SEND);
-        homeLandInput.setOnEditorActionListener((v, actionId, event) -> {
-            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEND) {
-                sendHomeLandGoal();
-                return true;
-            }
-            return false;
-        });
-        LinearLayout.LayoutParams landGoalLp = new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-        landGoalLp.setMargins(dp(8), 0, dp(4), 0);
-        landInputBar.addView(homeLandInput, landGoalLp);
-        homeLandSendBtn = new Button(this);
-        homeLandSendBtn.setText("发送");
-        homeLandSendBtn.setTextSize(14);
-        homeLandSendBtn.setTextColor(DyColor.onPrimary(this));
-        homeLandSendBtn.setBackground(bubbleBg(DyColor.primary(this), 20));
-        homeLandSendBtn.setPadding(dp(20), dp(10), dp(20), dp(10));
-        homeLandSendBtn.setOnClickListener(v -> {
-            v.performHapticFeedback(
-                    android.view.HapticFeedbackConstants.VIRTUAL_KEY);
-            sendHomeLandGoal();
-        });
-        landInputBar.addView(homeLandSendBtn);
-        toolPane.addView(landInputBar, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT));
         outer.addView(homeLandOuter, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.MATCH_PARENT));
@@ -2234,55 +1008,11 @@ public class MainActivity extends Activity {
     }
 
     /** v3.31 智能沉淀：报告列表 + 分享给 Muse */
-    private void showSediment() {
-        java.util.List<java.io.File> files = SedimentReport.all(this);
-        java.util.List<String> names = new java.util.ArrayList<>();
-        if (files.isEmpty()) {
-            names.add("（暂无报告，有运行数据后在 1/7/30 天节点自动生成）");
-        } else {
-            for (java.io.File f : files) names.add(f.getName());
-        }
-        names.add("➕ 立即生成近 7 天报告");
-        new android.app.AlertDialog.Builder(this)
-                .setTitle("🧠 智能沉淀报告")
-                .setItems(names.toArray(new String[0]), (d, w) -> {
-                    if (w == names.size() - 1) {
-                        new Thread(() -> {
-                            java.io.File f = SedimentReport.generate(this, 7);
-                            runOnUiThread(() -> {
-                                if (f != null) shareSediment(f);
-                                else android.widget.Toast.makeText(this, "近 7 天还没有运行数据", android.widget.Toast.LENGTH_SHORT).show();
-                            });
-                        }).start();
-                    } else if (!files.isEmpty() && w < files.size()) {
-                        shareSediment(files.get(w));
-                    }
-                })
-                .setNegativeButton("关闭", null)
-                .show();
-    }
 
-    private void shareSediment(java.io.File f) {
-        try {
-            java.io.BufferedReader r = new java.io.BufferedReader(
-                    new java.io.FileReader(f));
-            StringBuilder sb = new StringBuilder();
-            String line;
-            while ((line = r.readLine()) != null) sb.append(line).append("\n");
-            r.close();
-            android.content.Intent it = new android.content.Intent(
-                    android.content.Intent.ACTION_SEND);
-            it.setType("text/plain");
-            it.putExtra(android.content.Intent.EXTRA_TEXT, sb.toString());
-            startActivity(android.content.Intent.createChooser(it, "分享沉淀报告给 Muse"));
-        } catch (Exception e) {
-            android.widget.Toast.makeText(this, "读取报告失败：" + e.getMessage(), android.widget.Toast.LENGTH_SHORT).show();
-        }
-    }
 
     // ---------- 横屏模式 v3.95 ----------
     // 底部 tab 不动（用户 20:09 亲定）：横屏只重排内容区内部，
-    // 主页/远控变左右分栏，我的页居中限宽，智能体/终端满宽不变。
+    // 主页/远控变左右分栏，我的页居中限宽，终端满宽不变。
     // 旋转走 onConfigurationChanged 重排，不重建 Activity，
     // 所以输入草稿、滚动位置、当前详情都不丢。
     private boolean landscapeLayout = false;
@@ -2315,7 +1045,7 @@ public class MainActivity extends Activity {
             tabLp.setMargins(dp(16), 0, dp(16), dp(16));
         }
         tabBarView.setLayoutParams(tabLp);
-        TabIconView[] tabs = {tabHome, tabRemote, tabAgent, tabTerm, tabMy};
+        TabIconView[] tabs = {tabHome, tabRemote, tabTerm, tabMy};
         for (TabIconView t : tabs) {
             if (t == null) continue;
             LinearLayout.LayoutParams lp;
@@ -2615,588 +1345,11 @@ public class MainActivity extends Activity {
         return statusCard;
     }
 
-    private LinearLayout buildLlmCard() {
-        LinearLayout llmCard = card();
-        llmCard.addView(cardTitle("大模型配置（多密钥/多提供商）"));
-        llmProfilesBox = new LinearLayout(this);
-        llmProfilesBox.setOrientation(LinearLayout.VERTICAL);
-        llmCard.addView(llmProfilesBox);
-        Button bLlmNew = smallBtn("＋ 新增配置");
-        bLlmNew.setOnClickListener(v -> {
-            llmNewMode = true;
-            llmProvider = "自定义";
-            llmBaseUrl.setText("");
-            llmApiKey.setText("");
-            llmModel.setText("");
-            llmVisionModel.setText("");
-            llmNameInput.setText("");
-            log("填写后点保存，即新增一套密钥配置");
-        });
-        llmCard.addView(bLlmNew);
-        LinearLayout provRow = new LinearLayout(this);
-        provRow.setOrientation(LinearLayout.HORIZONTAL);
-        TextView provLabel = grayText("服务商：");
-        provRow.addView(provLabel);
-        for (String[] p : LlmStore.PRESETS) {
-            final String[] preset = p;
-            Button b = smallBtn(preset[0]);
-            b.setOnClickListener(v -> {
-                llmProvider = preset[0];
-                if (!preset[1].isEmpty()) llmBaseUrl.setText(preset[1]);
-                if (!preset[2].isEmpty()) llmModel.setText(preset[2]);
-                // 智谱默认配视觉模型
-                if ("智谱".equals(preset[0]) && llmVisionModel != null
-                        && llmVisionModel.getText().toString().isEmpty()) {
-                    llmVisionModel.setText("glm-4v-flash");
-                }
-                log("已选 " + preset[0]);
-            });
-            provRow.addView(b);
-        }
-        llmCard.addView(provRow);
-        llmNameInput = new EditText(this);
-        llmNameInput.setHint("配置名称，如：主力/备用");
-        llmNameInput.setTextSize(13);
-        llmNameInput.setSingleLine(true);
-        llmCard.addView(llmNameInput);
-        llmBaseUrl = new EditText(this);
-        llmBaseUrl.setHint("base_url，如 https://api.deepseek.com/v1");
-        llmBaseUrl.setTextSize(13);
-        llmBaseUrl.setSingleLine(true);
-        llmCard.addView(llmBaseUrl);
-        llmApiKey = new EditText(this);
-        llmApiKey.setHint("api_key（只存本机，只发往上面的地址）");
-        llmApiKey.setTextSize(13);
-        llmApiKey.setSingleLine(true);
-        llmApiKey.setInputType(android.text.InputType.TYPE_CLASS_TEXT
-                | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        llmCard.addView(llmApiKey);
-        llmModel = new EditText(this);
-        llmModel.setHint("model，如 deepseek-chat");
-        llmModel.setTextSize(13);
-        llmModel.setSingleLine(true);
-        // v2.89：模型行加拉取按钮
-        LinearLayout modelRow = new LinearLayout(this);
-        modelRow.setOrientation(LinearLayout.HORIZONTAL);
-        modelRow.addView(llmModel, new LinearLayout.LayoutParams(0,
-                LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
-        Button bFetchModels = smallBtn("拉取");
-        bFetchModels.setOnClickListener(v -> fetchModels());
-        modelRow.addView(bFetchModels);
-        llmCard.addView(modelRow);
-        llmVisionModel = new EditText(this);
-        llmVisionModel.setHint("视觉模型（可空，如 glm-4v-flash，智能体看屏幕用）");
-        llmVisionModel.setTextSize(13);
-        llmVisionModel.setSingleLine(true);
-        llmCard.addView(llmVisionModel);
-        LinearLayout llmBtns = new LinearLayout(this);
-        llmBtns.setOrientation(LinearLayout.HORIZONTAL);
-        Button bLlmSave = smallBtn("保存配置");
-        bLlmSave.setOnClickListener(v -> {
-            String key = llmApiKey.getText().toString().trim();
-            String nm = llmNameInput.getText().toString().trim();
-            if (llmNewMode) {
-                String nid = llmStore.add(nm, llmProvider,
-                        llmBaseUrl.getText().toString(),
-                        key, llmModel.getText().toString());
-                llmStore.update(nid, null, null, null, null, null,
-                        llmVisionModel.getText().toString());
-                llmNewMode = false;
-                log("已新增配置：" + llmStore.getActiveName());
-            } else {
-                if (key.isEmpty()) key = llmStore.getApiKeyRaw(); // 为空则保留原 key
-                LlmStore.Profile ap = llmStore.getActive();
-                if (ap != null) llmStore.update(ap.id, nm, llmProvider,
-                        llmBaseUrl.getText().toString(), key,
-                        llmModel.getText().toString(),
-                        llmVisionModel.getText().toString());
-                log("已保存：" + llmStore.getActiveName());
-            }
-            refreshLlm();
-            refreshLlmProfiles();
-            refreshAskModels();
-            refreshAgentModels();
-        });
-        Button bLlmDel = smallBtn("删除");
-        bLlmDel.setOnClickListener(v -> {
-            LlmStore.Profile ap = llmStore.getActive();
-            if (ap == null) return;
-            if (llmStore.delete(ap.id)) {
-                log("已删除：" + ap.name);
-                refreshLlm();
-                refreshLlmProfiles();
-            } else {
-                log("至少保留一套配置");
-            }
-        });
-        Button bLlmTest = smallBtn("测试连接");
-        bLlmTest.setOnClickListener(v -> {
-            llmStatus.setText("连接中…");
-            llmStatus.setTextColor(TEXT_GRAY);
-            new Thread(() -> {
-                LlmClient.Result r = llmStore.client().testConnection();
-                runOnUiThread(() -> {
-                    llmStatus.setText(r.text);
-                    llmStatus.setTextColor(r.ok ? GREEN : RED);
-                });
-            }).start();
-        });
-        llmBtns.addView(bLlmSave);
-        llmBtns.addView(bLlmDel);
-        llmBtns.addView(bLlmTest);
-        llmCard.addView(llmBtns);
-        llmStatus = new TextView(this);
-        llmStatus.setTextSize(13);
-        llmStatus.setTextColor(TEXT_GRAY);
-        llmCard.addView(llmStatus);
-
-        // ---- 辅助模型（智能体按需调用，如智谱视觉） ----
-        LinearLayout auxCard = card();
-        LinearLayout auxHeader = new LinearLayout(this);
-        auxHeader.setOrientation(LinearLayout.HORIZONTAL);
-        auxHeader.setGravity(Gravity.CENTER_VERTICAL);
-        TextView auxTitle = new TextView(this);
-        auxTitle.setText("辅助模型");
-        auxTitle.setTextSize(16);
-        auxTitle.setTypeface(auxTitle.getTypeface(),
-                android.graphics.Typeface.BOLD);
-        auxTitle.setTextColor(DyColor.onSurface(this));
-        LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-        auxHeader.addView(auxTitle, alp);
-        Button bAuxAdd = smallBtn("＋ 添加");
-        bAuxAdd.setOnClickListener(v -> auxModelDialog(null));
-        auxHeader.addView(bAuxAdd);
-        auxCard.addView(auxHeader);
-        auxCard.addView(grayText("独立于主力模型，智能体按需调用（如看屏幕用智谱视觉）"));
-        auxModelsBox = new LinearLayout(this);
-        auxModelsBox.setOrientation(LinearLayout.VERTICAL);
-        auxCard.addView(auxModelsBox);
-        llmCard.addView(auxCard);
-        refreshAuxModels();
-        return llmCard;
-    }
-
-    /** 刷新辅助模型列表 */
-    private void refreshAuxModels() {
-        if (auxModelsBox == null || auxModelStore == null) return;
-        auxModelsBox.removeAllViews();
-        java.util.List<AuxModelStore.AuxModel> list = auxModelStore.list();
-        if (list.isEmpty()) {
-            auxModelsBox.addView(grayText("暂无辅助模型，点右上添加（如智谱视觉）"));
-            return;
-        }
-        for (AuxModelStore.AuxModel m : list) {
-            final AuxModelStore.AuxModel am = m;
-            LinearLayout row = new LinearLayout(this);
-            row.setOrientation(LinearLayout.HORIZONTAL);
-            row.setGravity(Gravity.CENTER_VERTICAL);
-            row.setPadding(0, dp(6), 0, dp(6));
-            TextView t = new TextView(this);
-            String kind = AuxModelStore.kindName(am.kind);
-            t.setText(kind + " · " + am.name + "\n" + am.model
-                    + "（" + AuxModelStore.maskKey(am.apiKey) + "）");
-            t.setTextSize(13);
-            t.setTextColor(DyColor.onSurface(this));
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-            row.addView(t, lp);
-            Button bEdit = smallBtn("编辑");
-            bEdit.setOnClickListener(v -> auxModelDialog(am));
-            row.addView(bEdit);
-            Button bDel = smallBtn("删除");
-            bDel.setOnClickListener(v -> {
-                auxModelStore.delete(am.id);
-                refreshAuxModels();
-                log("已删除辅助模型");
-            });
-            row.addView(bDel);
-            auxModelsBox.addView(row);
-        }
-    }
-
-    /** 辅助模型添加/编辑对话框 */
-    private void auxModelDialog(AuxModelStore.AuxModel exist) {
-        LinearLayout form = new LinearLayout(this);
-        form.setOrientation(LinearLayout.VERTICAL);
-        form.setPadding(dp(8), dp(8), dp(8), dp(8));
-        EditText etName = new EditText(this);
-        etName.setHint("名称，如：智谱视觉");
-        etName.setTextSize(13);
-        if (exist != null) etName.setText(exist.name);
-        form.addView(etName);
-        EditText etBase = new EditText(this);
-        etBase.setHint("base_url，如 https://open.bigmodel.cn/api/paas/v4");
-        etBase.setTextSize(13);
-        if (exist != null) etBase.setText(exist.baseUrl);
-        else etBase.setText("https://open.bigmodel.cn/api/paas/v4");
-        form.addView(etBase);
-        EditText etKey = new EditText(this);
-        etKey.setHint("api_key（只存本机）");
-        etKey.setTextSize(13);
-        etKey.setInputType(android.text.InputType.TYPE_CLASS_TEXT
-                | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        form.addView(etKey);
-        EditText etModel = new EditText(this);
-        etModel.setHint("model，如 glm-4v-flash");
-        etModel.setTextSize(13);
-        if (exist != null) etModel.setText(exist.model);
-        else etModel.setText("glm-4v-flash");
-        // v3.19：model 行加拉取按钮（从 base_url 拉取模型 id 列表）
-        LinearLayout modelRow = new LinearLayout(this);
-        modelRow.setOrientation(LinearLayout.HORIZONTAL);
-        LinearLayout.LayoutParams mp = new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-        modelRow.addView(etModel, mp);
-        Button bFetchAux = smallBtn("拉取");
-        bFetchAux.setOnClickListener(v -> auxFetchModels(etBase, etKey, etModel));
-        modelRow.addView(bFetchAux);
-        form.addView(modelRow);
-        // 用途选择：视觉/语音/图像/对话
-        final String[] kinds = {AuxModelStore.KIND_VISION,
-                AuxModelStore.KIND_VOICE, AuxModelStore.KIND_IMAGE,
-                AuxModelStore.KIND_CHAT};
-        final int[] selKind = {0};
-        if (exist != null) {
-            for (int i = 0; i < kinds.length; i++) {
-                if (kinds[i].equals(exist.kind)) {
-                    selKind[0] = i;
-                    break;
-                }
-            }
-        }
-        android.widget.RadioGroup rg = new android.widget.RadioGroup(this);
-        rg.setOrientation(LinearLayout.HORIZONTAL);
-        for (int i = 0; i < kinds.length; i++) {
-            android.widget.RadioButton rb =
-                    new android.widget.RadioButton(this);
-            rb.setText(AuxModelStore.kindName(kinds[i]) + "模型");
-            rb.setTextSize(13);
-            rb.setId(i);
-            rg.addView(rb);
-        }
-        rg.check(selKind[0]);
-        rg.setOnCheckedChangeListener((g, id) -> selKind[0] = id);
-        form.addView(rg);
-
-        new android.app.AlertDialog.Builder(this)
-                .setTitle(exist == null ? "添加辅助模型" : "编辑辅助模型")
-                .setView(form)
-                .setPositiveButton("保存", (d, w) -> {
-                    String nm = etName.getText().toString().trim();
-                    String bu = etBase.getText().toString().trim();
-                    String ky = etKey.getText().toString().trim();
-                    String md = etModel.getText().toString().trim();
-                    if (bu.isEmpty() || md.isEmpty()) {
-                        log("地址和模型不能为空");
-                        return;
-                    }
-                    if (exist == null) {
-                        if (ky.isEmpty()) {
-                            log("请填写 api_key");
-                            return;
-                        }
-                        auxModelStore.add(nm, bu, ky, md, kinds[selKind[0]]);
-                        log("已添加辅助模型");
-                    } else {
-                        auxModelStore.update(exist.id, nm, bu, ky, md,
-                                kinds[selKind[0]]);
-                        log("已保存");
-                    }
-                    refreshAuxModels();
-                })
-                .setNegativeButton("取消", null)
-                .show();
-    }
-
-    private LinearLayout buildAgentPage() {
-        LinearLayout page = new LinearLayout(this);
-        page.setOrientation(LinearLayout.VERTICAL);
-        page.setPadding(dp(12), dp(8), dp(12), 0);
-        page.setBackgroundColor(DyColor.surface(this));
-
-        // v3.75：顶部功能折叠小按钮（软件框左上，点一下收起/展开上面一堆功能）
-        android.widget.Button topCollapseBtn = new android.widget.Button(this);
-        topCollapseBtn.setText("☰ 功能");
-        topCollapseBtn.setTextSize(12);
-        topCollapseBtn.setTextColor(DyColor.onPrimary(this));
-        topCollapseBtn.setBackground(bubbleBg(DyColor.primary(this), 16));
-        topCollapseBtn.setPadding(dp(12), dp(4), dp(12), dp(4));
-        android.widget.LinearLayout.LayoutParams topLp = new android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT);
-        topCollapseBtn.setLayoutParams(topLp);
-        // v3.76：只收纳下面圈出来的那几行（审批/悬浮窗/流式/文件列表），
-        // 标题+历史/新对话、模型行不收，默认收起，点左上角按钮才展开。
-        topCollapseBtn.setText("☰ 功能 ▸");
-        agentTopCollapsed = true;
-        topCollapseBtn.setOnClickListener(v -> {
-            agentTopCollapsed = !agentTopCollapsed;
-            int vis = agentTopCollapsed ? android.view.View.GONE : android.view.View.VISIBLE;
-            if (agentTopRisk != null) agentTopRisk.setVisibility(vis);
-            topCollapseBtn.setText(agentTopCollapsed ? "☰ 功能 ▸" : "☰ 功能 ▾");
-        });
-        page.addView(topCollapseBtn);
-        // 顶栏：标题 + 历史记录按钮
-        LinearLayout agentHeader = new LinearLayout(this);
-        agentTopHeader = agentHeader;
-        agentHeader.setOrientation(LinearLayout.HORIZONTAL);
-        agentHeader.setGravity(Gravity.CENTER_VERTICAL);
-        agentHeader.setPadding(0, 0, 0, dp(4));
-        TextView agentTitle = new TextView(this);
-        agentTitle.setText("思考执行员");
-        agentTitle.setTextSize(18);
-        agentTitle.setTypeface(agentTitle.getTypeface(),
-                android.graphics.Typeface.BOLD);
-        agentTitle.setTextColor(DyColor.onSurface(this));
-        LinearLayout.LayoutParams titleLp = new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-        agentHeader.addView(agentTitle, titleLp);
-        Button histBtn = smallBtn("🕘 历史");
-        histBtn.setOnClickListener(v -> showChatHistory());
-        agentHeader.addView(histBtn);
-        Button newChatBtn = smallBtn("✏️ 新对话");
-        newChatBtn.setOnClickListener(v -> {
-            if (chatStore != null) chatStore.newSession();
-                SharedMemory.clear(this);
-            clearChat();
-            agentLog("👋 新对话开始，在下方输入目标。");
-        });
-        agentHeader.addView(newChatBtn);
-        page.addView(agentHeader);
-
-        // 模型选择行：聊天框内切换主模型配置中的其他模型
-        LinearLayout agentModelRow = new LinearLayout(this);
-        agentModelRow.setOrientation(LinearLayout.HORIZONTAL);
-        agentModelRow.setGravity(Gravity.CENTER_VERTICAL);
-        agentModelRow.setPadding(0, 0, 0, dp(4));
-        TextView amLabel = grayText("模型：");
-        amLabel.setTextSize(12);
-        agentModelRow.addView(amLabel);
-        agentModelSpinner = new android.widget.Spinner(this);
-        LinearLayout.LayoutParams amLp = new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-        agentModelRow.addView(agentModelSpinner, amLp);
-        agentTopModel = agentModelRow;
-        page.addView(agentModelRow);
-        refreshAgentModels();
-
-        // 消息区在上，占满剩余空间
-        agentScrollView = new FollowScrollView(this);
-        agentMsgBox = new LinearLayout(this);
-        agentMsgBox.setOrientation(LinearLayout.VERTICAL);
-        agentMsgBox.setPadding(0, 0, 0, dp(8));
-        agentScrollView.addView(agentMsgBox, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT));
-        page.addView(agentScrollView, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
-
-
-
-
-
-
-        // 动作审批策略入口
-        final TextView riskRow = new TextView(this);
-        riskRow.setTextSize(12);
-        riskRow.setPadding(dp(4), dp(4), dp(4), dp(8));
-        riskRow.setClickable(true);
-        riskRow.setFocusable(true);
-        riskSummaryView = riskRow;
-        Runnable refreshRiskRow = this::refreshRiskRow;
-        riskRow.setOnClickListener(v -> showRiskDialog(refreshRiskRow));
-        // v2.95：审批行+悬浮窗行装进可收纳容器
-        final LinearLayout riskFloatBox = new LinearLayout(this);
-        riskFloatBox.setOrientation(LinearLayout.VERTICAL);
-        riskFloatBox.addView(riskRow);
-        agentTopRisk = riskFloatBox;
-        riskFloatBox.setVisibility(android.view.View.GONE);
-        page.addView(riskFloatBox);
-        refreshRiskRow.run();
-
-        // 悬浮窗权限入口
-        final TextView floatPermHint = new TextView(this);
-        floatPermHint.setTextSize(12);
-        floatPermHint.setPadding(dp(4), 0, dp(4), dp(8));
-        floatPermHint.setClickable(true);
-        floatPermHint.setFocusable(true);
-        Runnable refreshFloatHint = () -> {
-            boolean ok = FloatWindow.hasPermission(this);
-            floatPermHint.setText(ok ? "🪟 悬浮窗进度：已开启"
-                    : "🪟 悬浮窗进度：未开启（点我去开）");
-            floatPermHint.setTextColor(ok ? DyColor.onSurfaceVariant(this)
-                    : DyColor.primary(this));
-        };
-        refreshFloatHint.run();
-        floatPermHint.setOnClickListener(v -> {
-            if (FloatWindow.hasPermission(this)) return;
-            showPermRationale("为什么需要悬浮窗权限",
-                    "悬浮窗只用来在后台显示任务进度（思考💭/执行🖐实时流式），\n"
-                            + "切回 App 内会自动隐藏，不展示其他内容。\n\n"
-                            + "可随时在系统设置中关闭。",
-                    "去开启", () -> FloatWindow.requestPermission(this));
-        });
-        riskFloatBox.addView(floatPermHint);
-        // v2.97：流式输出开关
-        final TextView streamRow = new TextView(this);
-        streamRow.setTextSize(12);
-        streamRow.setPadding(dp(4), 0, dp(4), dp(8));
-        streamRow.setClickable(true);
-        streamRow.setFocusable(true);
-        final boolean[] streamOn = {getSharedPreferences("agent", MODE_PRIVATE)
-                .getBoolean("stream_output", true)};
-        Runnable refreshStream = () -> {
-            streamRow.setText(streamOn[0] ? "🌊 流式输出：已开启（点我关闭）"
-                    : "🌊 流式输出：已关闭（点我开启）");
-            streamRow.setTextColor(streamOn[0] ? DyColor.onSurfaceVariant(this)
-                    : DyColor.primary(this));
-        };
-        refreshStream.run();
-        streamRow.setOnClickListener(v -> {
-            streamOn[0] = !streamOn[0];
-            getSharedPreferences("agent", MODE_PRIVATE).edit()
-                    .putBoolean("stream_output", streamOn[0]).apply();
-            refreshStream.run();
-            log(streamOn[0] ? "🌊 流式输出已开启" : "🌊 流式输出已关闭");
-        });
-        riskFloatBox.addView(streamRow);
-        final TextView fileRow = new TextView(this);
-        fileRow.setTextSize(12);
-        fileRow.setPadding(dp(4), 0, dp(4), dp(8));
-        fileRow.setClickable(true);
-        fileRow.setFocusable(true);
-        fileRow.setText("📁 文件收件箱 / 发件箱（点我查看、打开、分享）");
-        fileRow.setTextColor(DyColor.primary(this));
-        fileRow.setOnClickListener(v -> showFileListDialog());
-        riskFloatBox.addView(fileRow);
-        // v2.96：收纳按钮放进输入栏（下面加），和发送对称
-        // v2.97：改图标（功能多，不叫审批了）
-        // v3.75：输入栏左边按钮改为文件输入（用户亲定），点它选文件喂给智能体；
-        // 原来的收纳功能改由左上角“☰ 功能”小按钮负责，不再占输入栏左边。
-        final Button riskToggleBtn = new Button(this);
-        riskToggleBtn.setText("📎");
-        riskToggleBtn.setTextSize(16);
-        riskToggleBtn.setTextColor(android.graphics.Color.WHITE);
-        riskToggleBtn.setBackground(bubbleBg(DyColor.primary(this), 20));
-        riskToggleBtn.setPadding(dp(12), dp(10), dp(12), dp(10));
-        riskToggleBtn.setOnClickListener(v -> {
-            android.content.Intent it = new android.content.Intent(
-                    android.content.Intent.ACTION_GET_CONTENT);
-            it.setType("*/*");
-            it.addCategory(android.content.Intent.CATEGORY_OPENABLE);
-            startActivityForResult(
-                    android.content.Intent.createChooser(it, "选一个文件喂给 GSIC"),
-                    REQ_FILE_IN);
-        });
-        // 每次进智能体页刷新状态（onResume 里调）
-        agentFloatHintRefresher = refreshFloatHint;
-
-        // 输入栏在下（Material 圆角）
-        LinearLayout inputBar = new LinearLayout(this);
-        inputBar.setOrientation(LinearLayout.HORIZONTAL);
-        inputBar.setGravity(Gravity.CENTER_VERTICAL);
-        inputBar.setBackground(bubbleBg(DyColor.surfaceVariant(this), 24));
-        agentInputBar = inputBar;
-        agentInputBg = inputBar.getBackground();
-        inputBar.setPadding(dp(6), dp(6), dp(6), dp(6));
-        agentGoal = new EditText(this);
-        agentGoal.setHint("输入目标，AI 照做");
-        agentGoal.setTextSize(14);
-        agentGoal.setSingleLine(true);
-        agentGoal.setBackground(null);
-        agentGoal.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_SEND);
-        agentGoal.setOnEditorActionListener((v, actionId, event) -> {
-            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEND) {
-                startAgent();
-                return true;
-            }
-            return false;
-        });
-        // v4.12：tab 隐藏改焦点驱动（用户 11-03 亲选）——点输入框拿到
-        // 焦点就先藏 tab，键盘还没升起来 tab 已经走了，布局在键盘
-        // 动画开始前就稳定了，不再是键盘升到一半才藏 tab、tab 滑出
-        // 和输入框边距、键盘三路同时动。只做“藏”不做“显”：失焦
-        // 本身不显示 tab，显示只走键盘收起后的防抖——v2.83 删焦点
-        // 监听就是因为焦点和键盘各管各的显隐会打架，这次焦点只进
-        // 不出，键盘只出（防抖后），两边不再抢方向。发送后 refocus
-        // 保持焦点（v2.88），tab 本来就该继续藏着，不算 bug。
-        // 输入框边距仍跟键盘走（v4.10/4.11）：焦点时只藏 tab，
-        // 边距等键盘升起再滑，输入框只动一次、不先下滑再上移。
-        agentGoal.setOnFocusChangeListener((v, hasFocus) -> {
-            if (hasFocus) {
-                if (pendingShowTab != null && tabBarView != null) {
-                    tabBarView.removeCallbacks(pendingShowTab);
-                }
-                hideTabBar();
-            }
-        });
-        LinearLayout.LayoutParams goalLp = new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-        goalLp.setMargins(dp(8), 0, dp(4), 0);
-        // v2.96：收纳按钮放输入栏最左，和发送对称
-        inputBar.addView(riskToggleBtn, 0);
-        inputBar.addView(agentGoal, goalLp);
-        agentSendBtn = new Button(this);
-        agentSendBtn.setText("发送");
-        agentSendBtn.setTextSize(14);
-        agentSendBtn.setTextColor(DyColor.onPrimary(this));
-        agentSendBtn.setBackground(bubbleBg(DyColor.primary(this), 20));
-        agentSendBtn.setPadding(dp(20), dp(10), dp(20), dp(10));
-        agentSendBtn.setOnClickListener(v -> {
-            // M3E 触感反馈：主操作给一记轻触感
-            v.performHapticFeedback(
-                    android.view.HapticFeedbackConstants.VIRTUAL_KEY);
-            if (agentThread != null && agentThread.isAlive()) {
-                agentStop = true;
-                agentLog("🛑 已请求停止");
-            } else if (chatThread != null && chatThread.isAlive()) {
-                if (chatStreamHandle != null) chatStreamHandle.cancel();
-                agentLog("🛑 已请求停止输出");
-            } else {
-                startAgent();
-            }
-        });
-        inputBar.addView(agentSendBtn);
-        LinearLayout.LayoutParams barLp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT);
-        // v2.94：输入框底部留空，避开悬浮 tab（消息可滑到 tab 下，输入框不行）
-        // v4.10 修：84dp 只是给竖屏底部 tab 留的，键盘弹起时 tab 已隐藏、
-        // 横屏时 tab 在右侧——这两种情况下 84dp 全是死空地，输入框就漂在
-        // 键盘上方 84dp 处（用户 11-03 实拍）。底部边距改由键盘显隐监听
-        // 动态调（见 updateInputBarBottomMargin），这里只留默认态。
-        barLp.setMargins(0, dp(8), 0, dp(84));
-        page.addView(inputBar, barLp);
-
-        // 恢复历史对话
-        loadingHistory = true;
-        try {
-            java.util.List<ChatStore.Msg> msgs = chatStore.currentMsgs();
-            if (msgs.isEmpty()) {
-                agentLog("👋 你好，我是思考执行员。输入目标后，我会先拆解规划再执行。");
-            } else {
-                for (ChatStore.Msg m : msgs) {
-                    if ("user".equals(m.role)) addChatBubble(m.text, true, m.time);
-                    else if ("agent".equals(m.role)) addChatBubble(m.text, false, m.time);
-                    else addChatSystem(m.text, m.time);
-                }
-                // v2.86：恢复历史后滚到底
-                if (agentScrollView != null) {
-                    agentScrollView.post(() -> agentScrollView.fullScroll(
-                            android.view.View.FOCUS_DOWN));
-                }
-            }
-        } finally {
-            loadingHistory = false;
-        }
-        return page;
-    }
 
     /** 无障碍权限：先讲清用途再跳系统设置 */
     private void showAccessRationale() {
         showPermRationale("为什么需要无障碍权限",
-                "思考执行员需要它来：\n"
+                "GSIC 需要它来：\n"
                         + "· 读取屏幕上的按钮和文字（眼睛）\n"
                         + "· 帮你点击、滑动、输入（手）\n"
                         + "· 免 root 截图（Android 11+ 系统截图接口）\n\n"
@@ -3218,164 +1371,6 @@ public class MainActivity extends Activity {
                 .show();
     }
 
-    private LinearLayout buildAskCard() {
-        LinearLayout askCard = card();
-        askCard.addView(cardTitle("问答测试"));
-        askCard.addView(grayText("走上面配置的大模型，验证连通与回答："));
-        // 模型选择：当前服务商的可选模型
-        LinearLayout modelRow = new LinearLayout(this);
-        modelRow.setOrientation(LinearLayout.HORIZONTAL);
-        modelRow.setGravity(Gravity.CENTER_VERTICAL);
-        TextView modelLabel = grayText("模型：");
-        modelRow.addView(modelLabel);
-        askModelSpinner = new android.widget.Spinner(this);
-        LinearLayout.LayoutParams spLp = new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-        modelRow.addView(askModelSpinner, spLp);
-        askCard.addView(modelRow);
-        refreshAskModels();
-        LinearLayout askRow = new LinearLayout(this);
-        askRow.setOrientation(LinearLayout.HORIZONTAL);
-        askRow.setGravity(Gravity.CENTER_VERTICAL);
-        llmAsk = new EditText(this);
-        llmAsk.setHint("输入一个问题");
-        llmAsk.setTextSize(13);
-        llmAsk.setSingleLine(true);
-        LinearLayout.LayoutParams askLp = new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-        askRow.addView(llmAsk, askLp);
-        llmReply = new TextView(this);
-        llmReply.setTextSize(13);
-        llmReply.setTextColor(TEXT_DARK);
-        llmReply.setLineSpacing(dp(3), 1f);
-        llmReply.setTextIsSelectable(true);
-        llmReply.setHint("回答会显示在这里，长按可复制");
-        ScrollView replyScroll = new ScrollView(this);
-        replyScroll.addView(llmReply, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT));
-        Button bAsk = smallBtn("问");
-        bAsk.setOnClickListener(v -> {
-            String q = llmAsk.getText().toString().trim();
-            if (q.isEmpty()) {
-                log("先输入问题");
-                return;
-            }
-            llmAsk.setText("");
-            llmReply.setText("思考中…");
-            final String useModel = askModelOverride.isEmpty()
-                    ? llmStore.getModel() : askModelOverride;
-            new Thread(() -> {
-                LlmClient c = llmStore.client();
-                // 用选中的模型覆盖
-                LlmClient.Result r = new LlmClient(
-                        llmStore.getBaseUrl(), llmStore.getApiKeyRaw(),
-                        useModel).chat(q);
-                runOnUiThread(() -> {
-                    llmReply.setText(r.ok ? r.text : "失败：" + r.text);
-                    replyScroll.post(() ->
-                            replyScroll.fullScroll(android.view.View.FOCUS_UP));
-                });
-            }).start();
-        });
-        askRow.addView(bAsk);
-        askCard.addView(askRow);
-        LinearLayout.LayoutParams replyLp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(170));
-        replyLp.setMargins(0, dp(4), 0, 0);
-        askCard.addView(replyScroll, replyLp);
-        return askCard;
-    }
-
-    /** 刷新智能体聊天框的模型下拉 */
-    private void refreshAgentModels() {
-        if (agentModelSpinner == null) return;
-        String[] models = llmStore.getProviderModels();
-        String cur = llmStore.getModel();
-        String provider = llmStore.getProvider();
-        java.util.List<String> items = new java.util.ArrayList<>();
-        if (cur != null && !cur.isEmpty())
-            items.add(cur + "（当前·" + provider + "）");
-        for (String m : models) {
-            if (!m.equals(cur)) items.add(m);
-        }
-        if (items.isEmpty()) items.add("（无可选模型）");
-        android.widget.ArrayAdapter<String> ad =
-                new android.widget.ArrayAdapter<>(this,
-                android.R.layout.simple_spinner_item, items);
-        ad.setDropDownViewResource(
-                android.R.layout.simple_spinner_dropdown_item);
-        agentModelSpinner.setAdapter(ad);
-        agentModelSpinner.setOnItemSelectedListener(
-                new android.widget.AdapterView.OnItemSelectedListener() {
-            @Override
-            public void onItemSelected(
-                    android.widget.AdapterView<?> parent,
-                    android.view.View view, int pos, long id) {
-                String sel = items.get(pos);
-                if (sel.endsWith("）") || sel.startsWith("（")) {
-                    agentModelOverride = "";
-                } else {
-                    agentModelOverride = sel;
-                }
-                behaviorLog.user("智能体切换模型", sel);
-            }
-            @Override
-            public void onNothingSelected(
-                    android.widget.AdapterView<?> parent) {
-            }
-        });
-    }
-
-    /** 智能体用的 LLM 客户端（含聊天框选中的模型覆盖） */
-    private LlmClient agentClient() {
-        if (agentModelOverride == null || agentModelOverride.isEmpty()) {
-            return llmStore.client();
-        }
-        return new LlmClient(llmStore.getBaseUrl(),
-                llmStore.getApiKeyRaw(), agentModelOverride);
-    }
-
-    /** 刷新问答测试的模型下拉：当前服务商的可选模型 */
-    private void refreshAskModels() {
-        if (askModelSpinner == null) return;
-        String[] models = llmStore.getProviderModels();
-        String cur = llmStore.getModel();
-        java.util.List<String> items = new java.util.ArrayList<>();
-        // 当前配置的模型放第一位
-        if (cur != null && !cur.isEmpty()) items.add(cur + "（当前）");
-        for (String m : models) {
-            if (!m.equals(cur)) items.add(m);
-        }
-        if (items.isEmpty()) items.add("（服务商无预设模型，用配置里的）");
-        android.widget.ArrayAdapter<String> ad =
-                new android.widget.ArrayAdapter<>(this,
-                android.R.layout.simple_spinner_item, items);
-        ad.setDropDownViewResource(
-                android.R.layout.simple_spinner_dropdown_item);
-        askModelSpinner.setAdapter(ad);
-        askModelSpinner.setOnItemSelectedListener(
-                new android.widget.AdapterView.OnItemSelectedListener() {
-            @Override
-            public void onItemSelected(
-                    android.widget.AdapterView<?> parent,
-                    android.view.View view, int pos, long id) {
-                String sel = items.get(pos);
-                // 去掉"（当前）"后缀
-                if (sel.endsWith("（当前）")) {
-                    askModelOverride = "";
-                } else if (sel.startsWith("（")) {
-                    askModelOverride = "";
-                } else {
-                    askModelOverride = sel;
-                }
-            }
-            @Override
-            public void onNothingSelected(
-                    android.widget.AdapterView<?> parent) {
-            }
-        });
-    }
 
     private LinearLayout buildSkillCard() {
         LinearLayout skillCard = card();
@@ -3407,13 +1402,25 @@ public class MainActivity extends Activity {
         skillHeader.addView(skillTitle, hlp);
         skillHeader.addView(importRow);
         skillCard.addView(skillHeader);
+        // 动作审批策略入口（原智能体页风险行：技能/技能卡运行是
+        // 审批的唯一本地调用方，重构后搬到技能页，点行改策略）
+        final TextView riskRow = new TextView(this);
+        riskRow.setTextSize(12);
+        riskRow.setPadding(dp(4), dp(4), dp(4), dp(8));
+        riskRow.setClickable(true);
+        riskRow.setFocusable(true);
+        riskSummaryView = riskRow;
+        Runnable refreshRiskRow = this::refreshRiskRow;
+        riskRow.setOnClickListener(v -> showRiskDialog(refreshRiskRow));
+        skillCard.addView(riskRow);
+        refreshRiskRow.run();
         skillsBox = new LinearLayout(this);
         skillsBox.setOrientation(LinearLayout.VERTICAL);
         skillCard.addView(skillsBox);
         // 技能卡区域
         LinearLayout cardSec = card();
         cardSec.addView(cardTitle("📇 技能卡"));
-        cardSec.addView(grayText("任务完成后自动生成总结，下次直接调用，免重复思考。用户创建的优先。"));
+        cardSec.addView(grayText("步骤卡按固定步骤执行；说明型卡展示全文，由云端 Muse 照着做。用户创建的优先。"));
         skillCardsBox = new LinearLayout(this);
         skillCardsBox.setOrientation(LinearLayout.VERTICAL);
         cardSec.addView(skillCardsBox);
@@ -3468,11 +1475,10 @@ public class MainActivity extends Activity {
                     }
                     final java.io.File f = FileInbox.importUri(this, uri, disp);
                     runOnUiThread(() -> {
-                        addChatSystem("📎 已收到文件：" + f.getName() + "（"
+                        log("📎 已收到文件：" + f.getName() + "（"
                                 + f.length() + " 字节），已放进收件箱 files/inbox/"
-                                + f.getName() + "。告诉我怎么处理它（解压 / 列出 / 打开等），"
-                                + "Agent 可用 read_file 读它。", "");
-                        addFileRow(f);
+                                + f.getName());
+                        showFileListDialog();
                     });
                 } catch (Exception e) {
                     runOnUiThread(() -> log("喂文件失败：" + e.getMessage()));
@@ -3503,7 +1509,7 @@ public class MainActivity extends Activity {
     /** v3.12 Issue 12：导入技能卡 JSON（剪贴板/文件共用）：校验+风险提示 */
     private void importSkillCardJson(String txt) {
         try {
-            org.json.JSONObject o = AgentLoop.extractJson(txt);
+            org.json.JSONObject o = JsonUtil.extractJson(txt);
             if (o == null) {
                 log("剪贴板里没找到合法 JSON");
                 return;
@@ -3558,78 +1564,6 @@ public class MainActivity extends Activity {
         return schedCard;
     }
 
-    private LinearLayout buildHistCard() {
-        LinearLayout histCard = card();
-        LinearLayout histHeader = new LinearLayout(this);
-        histHeader.setOrientation(LinearLayout.HORIZONTAL);
-        histHeader.setGravity(Gravity.CENTER_VERTICAL);
-        TextView ht = cardTitle("运行记录");
-        LinearLayout.LayoutParams hlp = new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-        histHeader.addView(ht, hlp);
-        Button bExport = smallBtn("📤 导出");
-        bExport.setOnClickListener(v -> exportLogs());
-        histHeader.addView(bExport);
-        histCard.addView(histHeader);
-        histBox = new LinearLayout(this);
-        histBox.setOrientation(LinearLayout.VERTICAL);
-        histCard.addView(histBox);
-        return histCard;
-    }
-
-    /** 导出运行日志：历史记录导出为 txt，可分享 */
-    private void exportLogs() {
-        new Thread(() -> {
-            try {
-                java.util.List<HistoryStore.Entry> list = historyStore.list();
-                StringBuilder sb = new StringBuilder();
-                sb.append("PhoneAgent 运行日志\n");
-                sb.append("导出时间: ").append(new java.text.SimpleDateFormat(
-                        "yyyy-MM-dd HH:mm:ss",
-                        java.util.Locale.getDefault()).format(
-                        new java.util.Date())).append("\n");
-                sb.append("共 ").append(list.size()).append(" 条记录\n");
-                sb.append("================================\n\n");
-                for (HistoryStore.Entry e : list) {
-                    sb.append("【").append(e.type).append("】")
-                            .append(e.title).append("\n");
-                    if (e.timeStr != null && !e.timeStr.isEmpty()) {
-                        sb.append("时间: ").append(e.timeStr).append("\n");
-                    }
-                    sb.append("结果: ").append(e.ok ? "成功" : "失败")
-                            .append("\n");
-                    if (e.detail != null && !e.detail.isEmpty()) {
-                        sb.append(e.detail).append("\n");
-                    }
-                    sb.append("--------------------------------\n");
-                }
-                String fname = "gsic_log_"
-                        + new java.text.SimpleDateFormat("yyyyMMdd_HHmmss",
-                        java.util.Locale.getDefault()).format(
-                        new java.util.Date()) + ".txt";
-                java.io.File out = new java.io.File(
-                        getExternalFilesDir(null), fname);
-                java.nio.file.Files.write(out.toPath(),
-                        sb.toString().getBytes("UTF-8"));
-                runOnUiThread(() -> {
-                    android.content.Intent share =
-                            new android.content.Intent(
-                            android.content.Intent.ACTION_SEND);
-                    share.setType("text/plain");
-                    share.putExtra(android.content.Intent.EXTRA_STREAM,
-                            CaptureProvider.uriFor(out));
-                    share.addFlags(
-                            android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                    startActivity(android.content.Intent.createChooser(
-                            share, "导出运行日志"));
-                    log("日志已导出: " + fname);
-                });
-            } catch (Exception e) {
-                runOnUiThread(() ->
-                        log("导出失败: " + e.getMessage()));
-            }
-        }).start();
-    }
 
     private void refreshSkillCards() {
         if (skillCardsBox == null) return;
@@ -3776,31 +1710,33 @@ public class MainActivity extends Activity {
     private void runSkillCard(String cardId) {
         SkillCardStore.Card c = new SkillCardStore(this).get(cardId);
         if (c == null) return;
-        // 说明型卡：TaskRunner 的 use_card 只把说明回给调用者、零动作，
-        // 手动运行走它就是「没执行却报 ✓」的假成功（2026-10-22 用户亲测）。
-        // 改转智能体任务：模型读卡说明后用自己的工具逐步执行（与 TG
-        // 通道同一条路），技能中心切到智能体页让用户看得见过程。
+        // 说明型卡：content 是自然语言说明、没有固定步骤，本地无法
+        // 按步骤执行（TaskRunner 的 use_card 只把说明回给调用者、
+        // 零动作，硬跑就是"没执行却报 ✓"的假成功，2026-10-22 用户亲测）。
+        // 本地手动运行改为弹窗展示全文；真正执行由云端 Muse 读说明后
+        // 拆步骤下发（/task steps，某步 use_card 读本卡说明）。
         if (c.isProse()) {
-            log("📇 说明型技能卡，转交智能体执行：" + c.name);
-            final String g = "执行技能卡《" + c.name + "》（id=" + c.id
-                    + "）：先用 use_card 读取本卡说明，再按说明用你的工具逐步完成";
-            runOnUiThread(() -> {
-                showPage(2);
-                agentGoal.setText(g);
-                startAgent();
-            });
+            new AlertDialog.Builder(this)
+                    .setTitle("📇 " + c.name + "（说明型）")
+                    .setMessage(c.content == null ? "" : c.content)
+                    .setPositiveButton("关闭", null)
+                    .show();
             return;
         }
         log("📇 手动运行技能卡：" + c.name);
+        localStop = false;
         new Thread(() -> {
-            TaskRunner runner = new TaskRunner(this, this::log);
-            runner.setRiskPolicy(riskPolicy);
-            runner.setApprover(MainActivity.this::askUserApprove);
+            // 用字段 runner（不用局部变量），审批弹窗点"停止任务"时
+            // stopLocalRunner 才能停掉它。
+            TaskRunner r = new TaskRunner(this, this::log);
+            runner = r;
+            r.setRiskPolicy(riskPolicy);
+            r.setApprover(MainActivity.this::askUserApprove);
             try {
                 org.json.JSONObject step = new org.json.JSONObject();
                 step.put("do", "use_card");
                 step.put("id", cardId);
-                boolean ok = runner.execOneStep(step.toString());
+                boolean ok = r.execOneStep(step.toString());
                 log(ok ? "技能卡执行完成 ✓" : "技能卡执行失败 ✗");
             } catch (Exception e) {
                 log("执行异常：" + e.getMessage());
@@ -3880,98 +1816,17 @@ public class MainActivity extends Activity {
         });
         runner.setRiskPolicy(riskPolicy);
         runner.setApprover(MainActivity.this::askUserApprove);
+        localStop = false;
         runThread = new Thread(() -> {
             boolean ok = runner.run(s.json);
-            historyStore.append(s.name, ok);
             runOnUiThread(() -> {
                 log(ok ? "完成 ✓" : "失败 ✗");
-                refreshHistory();
             });
         });
         runThread.start();
         log("开始：" + s.name);
     }
 
-    private void refreshHistory() {
-        if (histBox == null) return;
-        histBox.removeAllViews();
-        List<HistoryStore.Entry> list = historyStore.list();
-        if (list.isEmpty()) {
-            histBox.addView(grayText("暂无运行记录"));
-            return;
-        }
-        for (HistoryStore.Entry e : list) {
-            LinearLayout row = new LinearLayout(this);
-            row.setOrientation(LinearLayout.VERTICAL);
-            row.setPadding(0, dp(6), 0, dp(6));
-            TextView t = new TextView(this);
-            String icon = "task".equals(e.type) ? "🤖"
-                    : "card".equals(e.type) ? "📇" : "⚙️";
-            String title = e.title.isEmpty() ? "(空)" : e.title;
-            if (title.length() > 24) title = title.substring(0, 24) + "…";
-            boolean running = "running".equals(e.status);
-            String mark = running ? "🟢 " : (e.ok ? "✓ " : "✗ ");
-            t.setText(icon + " " + mark + title);
-            t.setTextSize(14);
-            t.setTextColor(running ? DyColor.primary(this)
-                    : e.ok ? DyColor.onSurface(this) : RED);
-            row.addView(t);
-            TextView d = new TextView(this);
-            StringBuilder dsb = new StringBuilder(e.timeStr);
-            if (!e.detail.isEmpty()) dsb.append(" · ").append(e.detail);
-            d.setText(dsb.toString());
-            d.setTextSize(12);
-            d.setTextColor(DyColor.onSurfaceVariant(this));
-            row.addView(d);
-            // 有审计明细的行可点开展示每步动作
-            if (e.stepsJson != null && e.stepsJson.length() > 2) {
-                final HistoryStore.Entry fe = e;
-                row.setClickable(true);
-                row.setFocusable(true);
-                TextView more = new TextView(this);
-                more.setText("📋 查看每步明细");
-                more.setTextSize(12);
-                more.setTextColor(DyColor.primary(this));
-                row.addView(more);
-                row.setOnClickListener(v -> showAuditDialog(fe));
-            }
-            histBox.addView(row);
-        }
-    }
-
-    /** 审计明细对话框：展示某次任务的每步动作 */
-    private void showAuditDialog(HistoryStore.Entry e) {
-        StringBuilder sb = new StringBuilder();
-        try {
-            org.json.JSONArray arr = new org.json.JSONArray(e.stepsJson);
-            for (int i = 0; i < arr.length(); i++) {
-                org.json.JSONObject o = arr.getJSONObject(i);
-                sb.append("第").append(o.optInt("round", 1)).append("轮·步骤")
-                        .append(o.optInt("n", 0)).append("：")
-                        .append(o.optString("do", "?")).append(" ")
-                        .append(o.optBoolean("ok", false) ? "✓" : "✗")
-                        .append(" ").append(o.optString("risk", "")).append("\n");
-                String out = o.optString("out", "");
-                if (!out.isEmpty()) sb.append("   ↳ ").append(out).append("\n");
-            }
-        } catch (Exception ex) {
-            sb.append("明细解析失败");
-        }
-        if (sb.length() == 0) sb.append("（无明细）");
-        TextView tv = new TextView(this);
-        tv.setText(sb.toString());
-        tv.setTextSize(12);
-        tv.setTextColor(DyColor.onSurface(this));
-        tv.setPadding(dp(8), dp(8), dp(8), dp(8));
-        tv.setTextIsSelectable(true);
-        android.widget.ScrollView sv = new android.widget.ScrollView(this);
-        sv.addView(tv);
-        new android.app.AlertDialog.Builder(this)
-                .setTitle("📋 每步动作明细")
-                .setView(sv)
-                .setPositiveButton("关闭", null)
-                .show();
-    }
 
     private void refreshSchedules() {
         schedBox.removeAllViews();
@@ -4153,7 +2008,6 @@ public class MainActivity extends Activity {
         remoteSections.put("tsnet", buildTsnetCard());
         remoteSections.put("relay", buildRelayCard());
         remoteSections.put("muse", buildMuseCard());
-        remoteSections.put("tg", buildTgCard());
         remoteSections.put("api", buildApiCard());
         remoteSections.put("task", buildRemoteTaskCard());
         remoteSections.put("settings", buildSettingsCard());
@@ -4178,11 +2032,9 @@ public class MainActivity extends Activity {
                 v -> showRemoteSection("tsnet"));
         addMenuRow(remoteList, "🔁", "Muse 服务器模式", "手机反向连 Muse 中继，出站长连接",
                 v -> showRemoteSection("relay"));
-        addMenuRow(remoteList, "✈️", "Telegram 机器人", "Bot 公网控制",
-                v -> showRemoteSection("tg"));
         addMenuRow(remoteList, "🔌", "API 接口", "接口文档",
                 v -> showRemoteSection("api"));
-        addMenuRow(remoteList, "🎯", "远控任务", "目标式任务实时进度",
+        addMenuRow(remoteList, "🎯", "远控任务", "步骤任务实时进度",
                 v -> showRemoteSection("task"));
         menu.addView(remoteList);
 
@@ -4233,7 +2085,7 @@ public class MainActivity extends Activity {
         remoteMenuScroll.setVisibility(View.VISIBLE);
     }
 
-    // ---------- 远控任务实时卡：目标式任务的思考过程 + 执行过程边跑边看 ----------
+    // ---------- 远控任务实时卡：步骤任务的执行过程边跑边看 ----------
     private TextView remoteTaskGoal, remoteTaskStatus, remoteTaskLog;
     private final android.os.Handler remoteTaskHandler =
             new android.os.Handler(android.os.Looper.getMainLooper());
@@ -4287,21 +2139,21 @@ public class MainActivity extends Activity {
         RemoteTask rt = ApiHandler.getLatestRemoteTask();
         if (rt == null) {
             remoteTaskGoal.setText("暂无远控任务");
-            remoteTaskStatus.setText("用 POST /task {\"goal\":\"...\"} 下发目标式任务后，这里实时显示思考与执行过程");
+            remoteTaskStatus.setText("用 POST /task {\"steps\":[...]} 下发步骤任务后，这里实时显示执行过程");
             remoteTaskLog.setText("");
             return;
         }
-        remoteTaskGoal.setText("🎯 " + rt.goal);
+        remoteTaskGoal.setText("🎯 " + (rt.name.isEmpty() ? "步骤任务" : rt.name));
         StringBuilder st = new StringBuilder();
         if (rt.done) {
             st.append(rt.ok ? "✅ 已完成" : "⏹ 已结束");
             if (!rt.error.isEmpty()) st.append("：").append(rt.error);
         } else {
-            st.append("▶ 进行中 · 第 ").append(rt.step())
-                    .append(" 步 / ").append(rt.maxSteps)
-                    .append("（已用 ").append(rt.elapsedSec()).append("s）");
+            st.append("▶ 进行中 · 第 ").append(rt.step()).append(" 步");
+            if (rt.totalSteps > 0) st.append(" / ").append(rt.totalSteps);
+            st.append("（已用 ").append(rt.elapsedSec()).append("s）");
         }
-        if (!rt.think().isEmpty()) st.append("\n💭 ").append(rt.think());
+        if (!rt.lastLog().isEmpty()) st.append("\n📝 ").append(rt.lastLog());
         remoteTaskStatus.setText(st.toString());
         StringBuilder sb = new StringBuilder();
         for (String l : rt.tail(12)) sb.append(l).append("\n");
@@ -4945,7 +2797,10 @@ public class MainActivity extends Activity {
             long remainMs = tm.getRemainingMs();
             String remainStr = remainMs < 0 ? "永久有效"
                     : "剩余 " + (remainMs / 86400000) + " 天";
-            tokenInfo.setText("当前 Token：" + masked + "\n" + remainStr);
+            // Issue #1：Keystore 降级时明确提示用户 token 未加密保存
+            String warn = tm.isKeystoreDegraded()
+                    ? "\n⚠️ Keystore 不可用，token 未加密保存，仅内存有效（重启后变更）" : "";
+            tokenInfo.setText("当前 Token：" + masked + "\n" + remainStr + warn);
         };
         refreshTokenInfo.run();
         museCard.addView(tokenInfo);
@@ -5018,108 +2873,6 @@ public class MainActivity extends Activity {
         return museCard;
     }
 
-    private LinearLayout buildTgCard() {
-        LinearLayout tgCard = card();
-        tgCard.addView(cardTitle("Telegram 机器人"));
-        tgCard.addView(grayText(
-                "去 @BotFather 建机器人拿 token，手机即 Bot：\n"
-                        + "Telegram 里发话，手机照做。不依赖 Tailscale。"));
-        tgToken = new EditText(this);
-        tgToken.setHint("Bot Token（只存本机）");
-        tgToken.setTextSize(13);
-        tgToken.setSingleLine(true);
-        tgToken.setInputType(android.text.InputType.TYPE_CLASS_TEXT
-                | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        tgCard.addView(tgToken);
-        // v2.99：TG 自启开关
-        LinearLayout tgAutoRow = new LinearLayout(this);
-        tgAutoRow.setOrientation(LinearLayout.HORIZONTAL);
-        tgAutoRow.setGravity(Gravity.CENTER_VERTICAL);
-        TextView tgAutoLabel = new TextView(this);
-        tgAutoLabel.setText("软件启动时自动开启机器人");
-        tgAutoLabel.setTextSize(13);
-        LinearLayout.LayoutParams tgAutoLp = new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-        tgAutoRow.addView(tgAutoLabel, tgAutoLp);
-        android.widget.Switch tgAutoSw = new android.widget.Switch(this);
-        boolean tgAuto = getSharedPreferences("agent", MODE_PRIVATE)
-                .getBoolean("tg_autostart", true);
-        tgAutoSw.setChecked(tgAuto);
-        tgAutoSw.setOnCheckedChangeListener((v, on) -> {
-            getSharedPreferences("agent", MODE_PRIVATE).edit()
-                    .putBoolean("tg_autostart", on).apply();
-            log(on ? "已开启 TG 自启" : "已关闭 TG 自启");
-        });
-        tgAutoRow.addView(tgAutoSw);
-        tgCard.addView(tgAutoRow);
-        LinearLayout tgBtns = new LinearLayout(this);
-        tgBtns.setOrientation(LinearLayout.HORIZONTAL);
-        Button bTgSave = smallBtn("保存");
-        bTgSave.setOnClickListener(v -> {
-            String t = tgToken.getText().toString().trim();
-            if (!t.isEmpty()) tgStore.saveToken(t);
-            tgToken.setText("");
-            refreshTg();
-            log("已保存");
-        });
-        Button bTgStart = smallBtn("启动");
-        bTgStart.setOnClickListener(v -> {
-            // v3.05：TG 在 Service 里跑
-            AgentService.startTgStatic(this);
-            refreshTg();
-            log("🤖 TG 机器人已启动（后台运行）");
-        });
-        Button bTgStop = smallBtn("停止");
-        bTgStop.setOnClickListener(v -> {
-            AgentService.stopTgStatic();
-            refreshTg();
-            log("🤖 TG 机器人已停止");
-        });
-        tgBtns.addView(bTgSave);
-        tgBtns.addView(bTgStart);
-        tgBtns.addView(bTgStop);
-        tgCard.addView(tgBtns);
-        tgStatus = new TextView(this);
-        tgStatus.setTextSize(13);
-        tgStatus.setTextColor(TEXT_GRAY);
-        tgCard.addView(tgStatus);
-        tgOwner = new TextView(this);
-        tgOwner.setTextSize(13);
-        tgOwner.setTextColor(TEXT_GRAY);
-        tgCard.addView(tgOwner);
-        Button bTgUnbind = smallBtn("解绑主人");
-        bTgUnbind.setOnClickListener(v -> {
-            // v3.07：解绑加确认，防止误触
-            if (!tgStore.hasOwner()) {
-                log("本来就没绑定主人");
-                return;
-            }
-            new android.app.AlertDialog.Builder(this)
-                    .setTitle("解绑主人？")
-                    .setMessage("解绑后机器人不再响应任何人，直到有人发 /start 重新绑定。")
-                    .setPositiveButton("解绑", (d, w) -> {
-                        long oldOwner = tgStore.getOwner();
-                        tgStore.unbindOwner();
-                        refreshTg();
-                        log("已解绑主人（" + oldOwner + "），下次 /start 重新绑定");
-                    })
-                    .setNegativeButton("取消", null)
-                    .show();
-        });
-        tgCard.addView(bTgUnbind);
-        tgLogView = new TextView(this);
-        tgLogView.setTextSize(12);
-        tgLogView.setTextColor(TEXT_DARK);
-        tgScrollView = new ScrollView(this);
-        tgScrollView.addView(tgLogView, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT));
-        LinearLayout.LayoutParams tgLp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(120));
-        tgLp.setMargins(0, dp(4), 0, 0);
-        tgCard.addView(tgScrollView, tgLp);
-        return tgCard;
-    }
 
     private LinearLayout buildApiCard() {
         LinearLayout apiCard = card();
@@ -5131,16 +2884,15 @@ public class MainActivity extends Activity {
                 + "GET /screen —— 读屏（结构化文本）\n"
                 + "GET /screenshot —— 真机截图（base64 PNG）\n"
                 + "POST /action —— 单步执行\n"
-                + "POST /task —— 执行完整任务\n"
-                + "  · goal 模式 {\"goal\":\"...\"} 默认异步：立即返回 taskId，"
-                + "用 GET /task/status?taskId= 轮询看思考与执行过程；"
-                + "加 \"wait\":true 则同步等结果\n\n"
+                + "POST /task —— 执行步骤任务（steps 模式，同步返回）\n"
+                + "  · {\"steps\":[{\"do\":\"tap\",\"x\":100,\"y\":200}, ...]}\n"
+                + "  · {\"do\":\"use_card\",\"id\":\"<卡ID>\"} 按技能卡执行\n\n"
                 + "/task 步骤新增：\n"
                 + "· termux：内置 Termux 里跑命令（⭐优先用）\n"
                 + "  {\"action\":\"termux\",\"cmd\":\"python3 a.py\"} \n"
                 + "· search：联网搜索，结果可存变量\n"
                 + "  {\"action\":\"search\",\"query\":\"xx\",\"save_as\":\"r\"} 后续用 {{r}} 引用\n\n"
-                + "鉴权：?token=xxx 或 Header X-Token\n"
+                + "鉴权：请求头 X-Token\n"
                 + "云端 Agent 经 Tailscale 内网调用，请勿暴露到公网。\n"
                 + "v2.42 起仅接受本机与 Tailscale 网段（100.64.0.0/10）的连接，"
                 + "局域网其他设备会被直接拒绝。");
@@ -5344,10 +3096,7 @@ public class MainActivity extends Activity {
             case JUMP: {
                 Button go = smallBtn("打开 →");
                 go.setOnClickListener(v -> {
-                    Runnable jump = () -> {
-                        if ("agenttab".equals(fld.jumpKey)) showPage(2);
-                        else showRemoteSection(fld.jumpKey);
-                    };
+                    Runnable jump = () -> showRemoteSection(fld.jumpKey);
                     if (fld.dangerous) {
                         SettingRegistry.confirmDangerous(this,
                                 "跳转到“" + fld.title + "”？",
@@ -5378,15 +3127,6 @@ public class MainActivity extends Activity {
         TextView v;
         v = settingsInfoViews.get("conn.remote_port");
         if (v != null) v.setText("当前端口：" + AgentService.getPort(this));
-        v = settingsInfoViews.get("model.main_model");
-        if (v != null) {
-            String m = "";
-            try {
-                m = llmStore == null ? "" : llmStore.getModel();
-            } catch (Exception ignored) {
-            }
-            v.setText(m == null || m.isEmpty() ? "（未配置）" : m);
-        }
         v = settingsInfoViews.get("about.version");
         if (v != null) v.setText("GSIC " + AppInfo.VERSION);
         v = settingsInfoViews.get("about.terms");
@@ -5463,7 +3203,6 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     appendTerm(result + "\n");
                     log("诊断完成");
-                    behaviorLog.app("Termux 诊断", result.replace("\n", " | "));
                 });
             }).start();
         });
@@ -5668,7 +3407,6 @@ public class MainActivity extends Activity {
                     termStatus.setTextColor(RED);
                     appendTerm("[启动失败] 找不到 bash: "
                             + bashFile.getAbsolutePath() + "\n");
-                    behaviorLog.app("Termux 启动失败", "找不到 bash");
                 });
                 return;
             }
@@ -5690,7 +3428,6 @@ public class MainActivity extends Activity {
                 startShellWith(
                         new String[]{prefix + "/bin/bash", "--login"},
                         env, "Termux");
-                behaviorLog.app("Termux 启动", "免 root 模式");
                 refreshTermuxEnv();
             });
         }).start();
@@ -5929,150 +3666,49 @@ public class MainActivity extends Activity {
         scHeader.addView(scTitle, scLp);
         scCard.addView(scHeader);
         scCard.addView(grayText(
-                "开启后记录你在软件内的操作和软件的反馈，用于自查问题"));
-        final TextView scStatus = new TextView(this);
-        scStatus.setTextSize(13);
-        scStatus.setTextColor(TEXT_GRAY);
-        scCard.addView(scStatus);
+                "开机自启与自更新回执（地基自验：有证据的状态）"));
         // v3.52：开机自启回执（地基自验：有证据的自启状态）
         final TextView scBoot = new TextView(this);
         scBoot.setTextSize(13);
         scBoot.setTextColor(TEXT_GRAY);
+        scBoot.setText(BootReceiver.receiptText(MainActivity.this));
         scCard.addView(scBoot);
         // 地基·自更新回执（与自启回执并列展示）
         final TextView scUpd = new TextView(this);
         scUpd.setTextSize(13);
         scUpd.setTextColor(TEXT_GRAY);
+        scUpd.setText(UpdateManager.receiptText(MainActivity.this));
         scCard.addView(scUpd);
-        final Button bToggle = smallBtn("▶ 开始记录");
-        final Runnable refreshSc = new Runnable() {
-            @Override
-            public void run() {
-                boolean rec = behaviorLog.isRecording();
-                bToggle.setText(rec ? "⏹ 停止记录" : "▶ 开始记录");
-                scStatus.setText(rec ? "● 正在记录…" : "未记录");
-                scStatus.setTextColor(rec ? Color.RED : TEXT_GRAY);
-                scBoot.setText(BootReceiver.receiptText(MainActivity.this));
-                scUpd.setText(UpdateManager.receiptText(MainActivity.this));
-            }
-        };
-        bToggle.setOnClickListener(v -> {
-            if (behaviorLog.isRecording()) {
-                behaviorLog.stop();
-                log("自检记录已停止");
-            } else {
-                behaviorLog.start();
-                log("自检记录开始，你的操作将被记录");
-            }
-            refreshSc.run();
-        });
-        LinearLayout scBtns = new LinearLayout(this);
-        scBtns.setOrientation(LinearLayout.HORIZONTAL);
-        scBtns.addView(bToggle);
-        Button bView = smallBtn("👁 查看");
-        bView.setOnClickListener(v -> showBehaviorLog());
-        scBtns.addView(bView);
-        Button bExp = smallBtn("📤 导出");
-        bExp.setOnClickListener(v -> exportBehaviorLog());
-        scBtns.addView(bExp);
-        Button bClr = smallBtn("🗑 清空");
-        bClr.setOnClickListener(v -> {
-            behaviorLog.clear();
-            log("自检记录已清空");
-        });
-        scBtns.addView(bClr);
-        scCard.addView(scBtns);
-        refreshSc.run();
         return scCard;
     }
 
-    /** 查看自检记录对话框 */
-    private void showBehaviorLog() {
-        java.util.List<String> list = behaviorLog.list();
-        StringBuilder sb = new StringBuilder();
-        if (list.isEmpty()) {
-            sb.append("暂无记录，先点「开始记录」");
-        } else {
-            for (String l : list) sb.append(l).append("\n");
-        }
-        TextView tv = new TextView(this);
-        tv.setText(sb.toString());
-        tv.setTextSize(12);
-        tv.setTextIsSelectable(true);
-        tv.setPadding(dp(8), dp(8), dp(8), dp(8));
-        ScrollView sv = new ScrollView(this);
-        sv.addView(tv);
-        sv.setLayoutParams(new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(400)));
-        new android.app.AlertDialog.Builder(this)
-                .setTitle("自检记录（最新在前）")
-                .setView(sv)
-                .setPositiveButton("关闭", null)
-                .show();
-        behaviorLog.user("查看自检记录");
-    }
-
-    /** 导出自检记录 */
-    private void exportBehaviorLog() {
-        new Thread(() -> {
-            try {
-                final java.io.File out =
-                        behaviorLog.exportFile(MainActivity.this);
-                runOnUiThread(() -> {
-                    android.content.Intent share =
-                            new android.content.Intent(
-                            android.content.Intent.ACTION_SEND);
-                    share.setType("text/plain");
-                    share.putExtra(
-                            android.content.Intent.EXTRA_STREAM,
-                            CaptureProvider.uriFor(out));
-                    share.addFlags(android.content.Intent
-                            .FLAG_GRANT_READ_URI_PERMISSION);
-                    startActivity(android.content.Intent.createChooser(
-                            share, "导出自检记录"));
-                    log("自检记录已导出");
-                });
-                behaviorLog.user("导出自检记录");
-            } catch (Exception e) {
-                runOnUiThread(() ->
-                        log("导出失败: " + e.getMessage()));
-            }
-        }).start();
-    }
 
     // v3.47: usage guide text, shared by About-Software and My-page bottom card (single source, no divergence)
     private static String usageGuideText() {
         return "【先做准备】\n"
                 + "1. 权限：开无障碍（读屏/点击/截图，只在本机用）、悬浮窗（任务进度与流光显示）；MIUI 还要放行后台弹出界面并加电池白名单，否则可能点不动或后台被杀。有 root 时自动走 root 操作通道，更快更稳；无 root 也能用（无障碍通道）。\n"
-                + "2. 模型：主页「云端大模型」填主模型（地址/Key/模型名，点「拉取」可从服务商获取模型列表直接选）。没配主模型 Key 时智能执行用不了，但本地直达指令照常。纯图标按钮靠视觉定位，建议在「辅助模型」里配一个视觉类模型（如智谱 glm-4v-flash），主模型会兜底。\n\n"
-                + "【智能体页：下达任务】\n"
-                + "底部中间「智能体」页输入一句目标即可，例如：打开汽水音乐领免费听歌时长 / 开启个人热点 / 打开微信给某人发消息。它会自己看屏、规划、动手、复核，走一步看一步，错了换方法；没有步数和总时长限制，觉得办完才停。\n"
-                + "运行中：全屏流光边框表示正在干活（触摸穿透，不挡你操作）；你可以中途在对话里插话纠正，它下一步就参考；发送按钮变停止可随时打断。虚拟屏在右上角有悬浮预览（仅 App 通道，见下）。\n"
-                + "快捷指令：/stop 强停、/clear 清空、/retry 重试、/help 帮助、/new 新开对话（清三端共享上下文）。\n\n"
-                + "【零 token 直达与闲聊】\n"
-                + "这几类不进模型、本地直接办：设闹钟、倒计时、打开/开启某个应用、打开相册、回桌面/回主页、静音/震动/响铃。打招呼、提问类闲聊走轻量对话回复，不烧任务 token；短指令默认按任务处理，不会被误判成闲聊。\n\n"
-                + "【监管者：防假完成】\n"
-                + "本地看门狗盯着重复动作、来回交替、连续失败、反复找不存在的文字、界面停滞；触发后监管者看最新截图裁决（给指引继续/办不成中止/误报放行）。任务结束还要过终审：监管者看最终截图核对目标，没办到会打回补做，办不到如实报未完成——自己说完成不算数。开关与监管模型在「我的」页：监管者默认用最强主模型，长按某个模型档案可指定它专做监管。\n\n"
+                + "2. 模型：本机不再配模型——大脑在云端 Muse：它通过远控看屏、拆步骤、下发执行；本机只负责按步骤动手（点/滑/输入/shell/文件等）。纯图标按钮由云端看截图定位。\n\n"
+                + "【技能与技能卡：本地执行】\n"
+                + "主页「技能」里手动运行技能或技能卡：步骤卡按固定 JSON 步骤重放，脚本卡跑 shell；说明型卡点开看全文，执行由云端 Muse 照说明拆步骤下发。\n"
+                + "运行中：顶部蓝条显示当前进度；全屏流光边框表示正在干活（触摸穿透，不挡你操作）。高风险动作会先弹窗请你确认（审批策略在技能页顶部改）。\n\n"
                 + "【技能卡】\n"
-                + "两种卡：步骤卡（JSON 固定步骤重放）和说明型卡（自然语言流程，交给智能体照着做）。来源：你手写的优先，其次是任务成功后自动沉淀的。技能中心可运行/删除/导出/导入；步骤可标 optional，失败只跳过不中断整卡；智能体也会按关键词自己调用合适的卡。常用任务存成卡，下次一句话直接办，省 token。\n\n"
+                + "两种卡：步骤卡（JSON 固定步骤重放）和说明型卡（自然语言流程，云端 Muse 照着做）。来源：你手写的优先。技能中心可运行/删除/导出/导入；步骤可标 optional，失败只跳过不中断整卡；云端 Muse 按需用 use_card 步骤调用合适的卡。常用任务存成卡，下次直接办。\n\n"
                 + "【定时任务】\n"
-                + "四种类型：每天、每周几、每隔 N 分钟、一次性。到点自动执行目标或技能卡，执行结果进运行记录。\n\n"
+                + "四种类型：每天、每周几、每隔 N 分钟、一次性。到点自动执行技能，执行结果看「我的」页任务日志。\n\n"
                 + "【远控页：服务与云端操控】\n"
                 + "1. 远程控制服务：启停服务、改端口（默认 28789）、看/复制 token。服务只放行本机回环和 Tailscale 网段，同 WiFi 的其他设备连不上；token 别给别人，拿到就能操作你的手机。\n"
-                + "2. 云端操控：手机装 Tailscale 并与云端 Muse 同一账号组网，在本页复制连接信息（IP/端口/token）发给 Muse，它就能用 /status 看状态、/screen 读屏、/screenshot 截屏、/action 单步、/task 下达步骤或目标、/task/status 看实时进度。远控任务在主屏执行，结束后自动回桌面。\n"
+                + "2. 云端操控：手机装 Tailscale 并与云端 Muse 同一账号组网，在本页复制连接信息（IP/端口/token）发给 Muse，它就能用 /status 看状态、/screen 读屏、/screenshot 截屏、/action 单步、/task 下达步骤任务。远控任务在主屏执行。\n"
                 + "3. API 接口卡有每个接口的说明与示例。\n\n"
-                + "【Telegram 机器人】\n"
-                + "远控页的 TG 卡填 Bot token 后启用，软件启动会自动拉起。先给 Bot 发 /start 绑定主人，只认主人的消息。直接发文字就是下达目标；指令：/status 状态、/shot 截屏、/stop 打断、/new 新对话、/task {json} 跑步骤、/agent 目标 智能执行。执行进度会在一条消息里原地更新，结束发简短总结。\n\n"
                 + "【虚拟屏】\n"
-                + "只有 App 通道发的任务默认在虚拟屏里跑（需要 root）：不占用主屏，右上角悬浮预览能实时看到它在做什么，结束自动销毁。Telegram 和远控的任务在主屏执行。注意：系统相机在虚拟屏里不画图（MIUI 限制），涉及相机预览的任务请在主屏做。\n\n"
+                + "App 内手动跑的技能默认在虚拟屏里跑（需要 root）：不占用主屏，右上角悬浮预览能实时看到它在做什么，结束自动销毁。远控的任务在主屏执行。注意：系统相机在虚拟屏里不画图（MIUI 限制），涉及相机预览的任务请在主屏做。\n\n"
                 + "【终端页】\n"
-                + "内置 Termux：首次一键下载官方环境（约 30MB，校验后使用），免 root 用 staging 模式也能跑 bash 和 pkg；终端页可直接交互，智能体也能用 termux 工具在本地查信息、算数、处理文件。环境异常先点「诊断」，链接坏了点「修复链接」。无 root 设备不显示终端页。\n\n"
+                + "内置 Termux：首次一键下载官方环境（约 30MB，校验后使用），免 root 用 staging 模式也能跑 bash 和 pkg；终端页可直接交互，云端 Muse 也能下发 termux 步骤在本地查信息、算数、处理文件。环境异常先点「诊断」，链接坏了点「修复链接」。无 root 设备不显示终端页。\n\n"
                 + "【我的页】\n"
-                + "关于更新：看版本、检查更新、设更新源；关于软件：本使用方法 + 全部更新日志。还有：监管者输出（独立折叠区）、动作审批（见下）、长期记忆管理（查看/删单条/清空）、智能沉淀（1/7/30 天报告，可分享给 Muse 分析）、任务日志与运行记录（可导出）、软件自检。\n\n"
+                + "关于更新：看版本、检查更新、设更新源；关于软件：本使用方法 + 全部更新日志。还有：动作审批（见下）、任务日志、热补丁、文件收件箱、软件自检。\n\n"
                 + "【安全与动作审批】\n"
-                + "动作按风险分四级：只读/设备控制/外部效应/破坏性，每级可设自动允许、每次确认或拒绝。远控和 Telegram 进来的任务没有审批人在场，「每次确认」档会被直接拦截。API Key、TG token、远控 token 和用户记忆都经系统 Keystore 加密保存，不明文存。\n\n"
+                + "动作按风险分四级：只读/设备控制/外部效应/破坏性，每级可设自动允许、每次确认或拒绝（技能页顶部点行修改）。远控进来的任务没有审批人在场，「每次确认」档会被直接拦截。远控 token 经系统 Keystore 加密保存，不明文存。\n\n"
                 + "【限制与排障】\n"
-                + "办不成会如实报未完成和卡点，常见原因：没配模型 Key、视觉模型不可用、目标 App 改版、强弹窗广告或验证码、应用根本没装。任务长时间没进展可 /stop 打断后换个说法重试，或看「我的」页的任务日志定位卡在哪一步。\n\n"
+                + "办不成会如实报未完成和卡点，常见原因：目标 App 改版、强弹窗广告或验证码、应用根本没装、无障碍未开。任务长时间没进展可让云端 Muse 换个方法重试，或看「我的」页的任务日志定位卡在哪一步。\n\n"
                 + "【返回键】非主页按返回先回主页，主页双击退出。";
     }
 
@@ -6332,50 +3968,6 @@ public class MainActivity extends Activity {
         // v2.65：关于软件（含使用方法+更新日志，二级折叠）
         inner.addView(buildAboutSoftwareCard());
 
-        // v2.62：监管者独立输出区（可折叠，与智能体输出分开）
-        LinearLayout supCard = card();
-        LinearLayout supHeader = new LinearLayout(this);
-        supHeader.setOrientation(LinearLayout.HORIZONTAL);
-        supHeader.setGravity(Gravity.CENTER_VERTICAL);
-        supHeader.setClickable(true);
-        supHeader.setFocusable(true);
-        supHeader.setPadding(dp(4), dp(4), dp(4), dp(4));
-        TextView supTitle = new TextView(this);
-        supTitle.setText("🔍 监管者输出");
-        supTitle.setTextSize(13);
-        supTitle.setTypeface(supTitle.getTypeface(),
-                android.graphics.Typeface.BOLD);
-        supTitle.setTextColor(DyColor.onSurface(this));
-        LinearLayout.LayoutParams supLp = new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-        supHeader.addView(supTitle, supLp);
-        final TextView supArrow = new TextView(this);
-        supArrow.setTextSize(14);
-        supArrow.setTextColor(DyColor.onSurfaceVariant(this));
-        supHeader.addView(supArrow);
-        supCard.addView(supHeader);
-        supervisorScrollView = new ScrollView(this);
-        supervisorMsgBox = new LinearLayout(this);
-        supervisorMsgBox.setOrientation(LinearLayout.VERTICAL);
-        supervisorScrollView.addView(supervisorMsgBox,
-                new LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT));
-        // 限高 120dp，避免占太多空间
-        supervisorScrollView.setLayoutParams(new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(120)));
-        supCard.addView(supervisorScrollView);
-        final boolean[] supOpen = {false};
-        Runnable paintSup = () -> supArrow.setText(supOpen[0] ? "▾" : "▸");
-        supHeader.setOnClickListener(v -> {
-            supOpen[0] = !supOpen[0];
-            supervisorScrollView.setVisibility(
-                    supOpen[0] ? View.VISIBLE : View.GONE);
-            paintSup.run();
-        });
-        supervisorScrollView.setVisibility(View.GONE);
-        paintSup.run();
-        inner.addView(supCard);
 
         // v2.93：任务日志查看
         LinearLayout logCard = card();
@@ -6449,6 +4041,37 @@ public class MainActivity extends Activity {
         logCard.addView(logOptRow);
         inner.addView(logCard);
 
+        // 文件收件箱 / 发件箱（原智能体页入口，重构后搬到我的页）
+        LinearLayout inboxCard = card();
+        LinearLayout inboxHeader = new LinearLayout(this);
+        inboxHeader.setOrientation(LinearLayout.HORIZONTAL);
+        inboxHeader.setGravity(Gravity.CENTER_VERTICAL);
+        TextView inboxTitle = new TextView(this);
+        inboxTitle.setText("📁 文件收件箱");
+        inboxTitle.setTextSize(16);
+        inboxTitle.setTypeface(inboxTitle.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        LinearLayout.LayoutParams inboxLp = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        inboxHeader.addView(inboxTitle, inboxLp);
+        Button bViewInbox = smallBtn("查看");
+        bViewInbox.setOnClickListener(v -> showFileListDialog());
+        inboxHeader.addView(bViewInbox);
+        Button bFeedInbox = smallBtn("喂文件");
+        bFeedInbox.setOnClickListener(v -> {
+            android.content.Intent it = new android.content.Intent(
+                    android.content.Intent.ACTION_GET_CONTENT);
+            it.setType("*/*");
+            it.addCategory(android.content.Intent.CATEGORY_OPENABLE);
+            startActivityForResult(
+                    android.content.Intent.createChooser(it, "选一个文件喂给 GSIC"),
+                    REQ_FILE_IN);
+        });
+        inboxHeader.addView(bFeedInbox);
+        inboxCard.addView(inboxHeader);
+        inboxCard.addView(grayText("喂进来的文件在 files/inbox/，任务产出的文件在 files/outbox/。"));
+        inner.addView(inboxCard);
+
         // v3.13 Issue 3：热补丁管理
         LinearLayout patchCard = card();
         LinearLayout patchHeader = new LinearLayout(this);
@@ -6509,26 +4132,6 @@ public class MainActivity extends Activity {
         patchCard.addView(bRollback);
         inner.addView(patchCard);
 
-        // v3.11 Issue 8：记忆管理
-        LinearLayout memCard = card();
-        LinearLayout memHeader = new LinearLayout(this);
-        memHeader.setOrientation(LinearLayout.HORIZONTAL);
-        memHeader.setGravity(Gravity.CENTER_VERTICAL);
-        TextView memTitle = new TextView(this);
-        memTitle.setText("🧠 记忆管理");
-        memTitle.setTextSize(16);
-        memTitle.setTypeface(memTitle.getTypeface(),
-                android.graphics.Typeface.BOLD);
-        LinearLayout.LayoutParams memLp = new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-        memHeader.addView(memTitle, memLp);
-        Button bViewMem = smallBtn("查看");
-        bViewMem.setOnClickListener(v -> showMemoryList());
-        memHeader.addView(bViewMem);
-        memCard.addView(memHeader);
-        memCard.addView(grayText("本地存储，不上传。App 记住的偏好和事实都在这里。"));
-        inner.addView(memCard);
-
 
         // v2.62：更多设置（可折叠）——监管者开关放这里，缩小
         LinearLayout moreCard = card();
@@ -6564,21 +4167,9 @@ public class MainActivity extends Activity {
         });
         moreBody.setVisibility(View.GONE);
         paintMore.run();
-        // v2.67：高级动作收纳到更多设置（缩小）
-        agentAdvBox = new android.widget.CheckBox(this);
-        agentAdvBox.setText("🔧 高级动作（shell / 文件读写 / 抓网页）");
-        agentAdvBox.setTextSize(10);
-        agentAdvBox.setTextColor(DyColor.onSurfaceVariant(this));
-        agentAdvBox.setChecked(
-                getSharedPreferences("agent", MODE_PRIVATE).getBoolean("adv", true));
-        agentAdvBox.setOnCheckedChangeListener((v, on) ->
-                getSharedPreferences("agent", MODE_PRIVATE).edit()
-                        .putBoolean("adv", on).apply());
-        agentAdvBox.setPadding(dp(4), 0, dp(4), dp(4));
-        moreBody.addView(agentAdvBox);
         // v3.10 Issue 4：远程高危动作策略
         TextView remoteRiskLabel = new TextView(this);
-        remoteRiskLabel.setText("🛡️ 远程高危动作策略（HTTP/TG）");
+        remoteRiskLabel.setText("🛡️ 远程高危动作策略（HTTP）");
         remoteRiskLabel.setTextSize(10);
         remoteRiskLabel.setTextColor(DyColor.onSurfaceVariant(this));
         remoteRiskLabel.setPadding(dp(4), dp(4), dp(4), 0);
@@ -6686,19 +4277,6 @@ public class MainActivity extends Activity {
                         .putBoolean("pet_desktop_only", on).apply());
         petDeskBox.setPadding(dp(4), 0, dp(4), dp(4));
         moreBody.addView(petDeskBox);
-        // 监管者开关：默认开启，可关闭，设置持久化
-        agentSupervisorBox = new android.widget.CheckBox(this);
-        agentSupervisorBox.setText("🔍 监管者复核（任务结束后独立判定完成度）");
-        agentSupervisorBox.setTextSize(10);
-        agentSupervisorBox.setTextColor(DyColor.onSurfaceVariant(this));
-        agentSupervisorBox.setChecked(
-                getSharedPreferences("agent", MODE_PRIVATE).getBoolean(
-                        "supervisor", true));
-        agentSupervisorBox.setOnCheckedChangeListener((v, on) ->
-                getSharedPreferences("agent", MODE_PRIVATE).edit()
-                        .putBoolean("supervisor", on).apply());
-        agentSupervisorBox.setPadding(dp(4), 0, dp(4), dp(4));
-        moreBody.addView(agentSupervisorBox);
         // v2.79：启动自动开启远控服务开关
         android.widget.CheckBox autoRemoteBox =
                 new android.widget.CheckBox(this);
@@ -6715,28 +4293,6 @@ public class MainActivity extends Activity {
         moreBody.addView(autoRemoteBox);
         inner.addView(moreCard);
 
-        LinearLayout profileCard = card();
-        LinearLayout profileHeader = new LinearLayout(this);
-        profileHeader.setOrientation(LinearLayout.HORIZONTAL);
-        profileHeader.setGravity(Gravity.CENTER_VERTICAL);
-        TextView profileTitle = new TextView(this);
-        profileTitle.setText("用户画像");
-        profileTitle.setTextSize(18);
-        profileTitle.setTypeface(profileTitle.getTypeface(),
-                android.graphics.Typeface.BOLD);
-        profileTitle.setTextColor(DyColor.onSurface(this));
-        LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-        profileHeader.addView(profileTitle, plp);
-        Button bRefreshProfile = smallBtn("🔄 刷新");
-        bRefreshProfile.setOnClickListener(v -> refreshUserProfile(true));
-        profileHeader.addView(bRefreshProfile);
-        profileCard.addView(profileHeader);
-        profileCard.addView(grayText("智能体从对话和任务中自动总结，不定时更新"));
-        userProfileBox = new LinearLayout(this);
-        userProfileBox.setOrientation(LinearLayout.VERTICAL);
-        profileCard.addView(userProfileBox);
-        inner.addView(profileCard);
 
         LinearLayout useCard = card();
         useCard.addView(cardTitle("使用方法"));
@@ -6861,76 +4417,6 @@ public class MainActivity extends Activity {
     // v2.83：加动画取消+状态防抖，防输入框和 tab 打架
     private boolean tabBarHidden = false;
 
-    /** v4.11：输入框底部边距动画的目标与进行中的动画。
-     * v4.10 的教训：边距一帧从 84dp 切到 8dp，输入框在键盘还在
-     * 往上走、tab 还在往下滑的时候瞬间瞬移 76dp，眼睛看到的就是
-     * 闪烁 + 不丝滑。改成 250ms 的平滑动画后，输入框跟着键盘/tab
-     * 一起滑到位。inputMarginTarget 是“正在往哪个值滑”，动画进行中
-     * 布局边距是中间值、还没到目标——全局布局监听每帧都来时，必须
-     * 认目标不认当前值，否则每帧都重启动画、抖得更厉害。 */
-    private android.animation.ValueAnimator inputMarginAnimator = null;
-    private int inputMarginTarget = -1;
-
-    /** v4.10：输入框底部边距跟键盘走——键盘弹起（tab 已隐藏）或横屏
-     * （tab 在右侧）时只留 8dp，输入框贴紧键盘/底部；只有竖屏且键盘
-     * 收起、底部 tab 占位时才留 84dp 避让。
-     * v4.11：改瞬切为 250ms 平滑动画（时长对齐键盘升起与 tab 滑出），
-     * 目标不变时直接返回，不重启进行中的动画。 */
-    private void updateInputBarBottomMargin(boolean kbVisible) {
-        if (agentInputBar == null) {
-            return;
-        }
-        try {
-            android.view.ViewGroup.LayoutParams lp = agentInputBar.getLayoutParams();
-            if (!(lp instanceof LinearLayout.LayoutParams)) {
-                return;
-            }
-            LinearLayout.LayoutParams llp = (LinearLayout.LayoutParams) lp;
-            boolean needTabClearance = !kbVisible && !landscapeLayout;
-            int want = needTabClearance ? dp(84) : dp(8);
-            if (want == inputMarginTarget) {
-                return;
-            }
-            inputMarginTarget = want;
-            if (inputMarginAnimator != null) {
-                try { inputMarginAnimator.cancel(); } catch (Exception ignored) {}
-                inputMarginAnimator = null;
-            }
-            int from = llp.bottomMargin;
-            if (from == want) {
-                return;
-            }
-            final LinearLayout.LayoutParams animLp = llp;
-            android.animation.ValueAnimator anim =
-                    android.animation.ValueAnimator.ofInt(from, want);
-            anim.setDuration(250);
-            anim.setInterpolator(new android.view.animation.DecelerateInterpolator());
-            anim.addUpdateListener(a -> {
-                try {
-                    animLp.bottomMargin = (Integer) a.getAnimatedValue();
-                    agentInputBar.setLayoutParams(animLp);
-                } catch (Exception ignored) {
-                }
-            });
-            anim.addListener(new android.animation.AnimatorListenerAdapter() {
-                @Override
-                public void onAnimationEnd(android.animation.Animator animation) {
-                    if (inputMarginAnimator == animation) {
-                        inputMarginAnimator = null;
-                    }
-                }
-                @Override
-                public void onAnimationCancel(android.animation.Animator animation) {
-                    if (inputMarginAnimator == animation) {
-                        inputMarginAnimator = null;
-                    }
-                }
-            });
-            inputMarginAnimator = anim;
-            anim.start();
-        } catch (Exception ignored) {
-        }
-    }
 
     private void hideTabBar() {
         if (tabBarHidden) return;
@@ -7007,25 +4493,14 @@ public class MainActivity extends Activity {
 
     private void showPage(int idx) {
         getSharedPreferences("ui", MODE_PRIVATE).edit().putInt("tab", idx).apply();
-        String[] tabNames = {"主页", "远控", "智能体", "终端", "我的"};
-        if (behaviorLog != null && idx >= 0 && idx < tabNames.length) {
-            behaviorLog.user("切换标签页", tabNames[idx]);
-        }
         pageHome.setVisibility(idx == 0 ? View.VISIBLE : View.GONE);
         pageRemote.setVisibility(idx == 1 ? View.VISIBLE : View.GONE);
-        pageAgent.setVisibility(idx == 2 ? View.VISIBLE : View.GONE);
-        pageTerm.setVisibility(idx == 3 ? View.VISIBLE : View.GONE);
-        pageMy.setVisibility(idx == 4 ? View.VISIBLE : View.GONE);
+        pageTerm.setVisibility(idx == 2 ? View.VISIBLE : View.GONE);
+        pageMy.setVisibility(idx == 3 ? View.VISIBLE : View.GONE);
         tabHome.setActive(idx == 0);
         tabRemote.setActive(idx == 1);
-        tabAgent.setActive(idx == 2);
-        tabTerm.setActive(idx == 3);
-        tabMy.setActive(idx == 4);
-        // v2.86：切到智能体页时滚到底（别停在顶部看旧消息）
-        if (idx == 2 && agentScrollView != null) {
-            agentScrollView.post(() -> agentScrollView.fullScroll(
-                    android.view.View.FOCUS_DOWN));
-        }
+        tabTerm.setActive(idx == 2);
+        tabMy.setActive(idx == 3);
         // v4.04：切到主页时按方向切换主页布局——横屏显示
         // 虚拟屏+工具代码、藏菜单详情，离开主页停表省资源
         try {
@@ -7044,7 +4519,7 @@ public class MainActivity extends Activity {
     private TabIconView makeTab(int kind, int idx) {
         TabIconView b = new TabIconView(this, kind);
         // 无障碍：读屏时报文字名
-        String[] names = {"主页", "远控", "思考执行员", "终端", "我的"};
+        String[] names = {"主页", "远控", "终端", "我的"};
         if (idx >= 0 && idx < names.length) b.setContentDescription(names[idx]);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 0, dp(46), 1f);
@@ -7183,7 +4658,7 @@ public class MainActivity extends Activity {
         }
         sb.append("Token：").append(token).append("\n");
         sb.append("接口：GET /status ｜ GET /screen ｜ GET /screenshot ｜ POST /action ｜ POST /task\n");
-        sb.append("鉴权：URL 参数 ?token= 或请求头 X-Token");
+        sb.append("鉴权：请求头 X-Token");
         return sb.toString();
     }
 
@@ -7223,12 +4698,8 @@ public class MainActivity extends Activity {
         }
 
         skillStore = new SkillStore(this);
-        historyStore = new HistoryStore(this);
         scheduleStore = new ScheduleStore(this);
         bootstrapManager = new BootstrapManager(this);
-        llmStore = new LlmStore(this);
-        llmProvider = llmStore.getProvider();
-        tgStore = new TgStore(this);
         riskPolicy = new ActionRisk.Policy(this);
 
         // v2.79：启动默认开启远控服务（可在更多设置关闭）
@@ -7290,21 +4761,14 @@ public class MainActivity extends Activity {
         appbarLp.setMargins(dp(16), dp(12), dp(16), dp(8));
         content.addView(appbar, appbarLp);
 
-        chatStore = new ChatStore(this);
-        userProfile = new UserProfile(this);
         captureStore = new CaptureStore(this);
-        auxModelStore = new AuxModelStore(this);
-        behaviorLog = new BehaviorLog(this);
         pageHome = buildHomePage();
         pageRemote = buildRemotePage();
-        pageAgent = buildAgentPage();
         pageTerm = buildTermPage();
         pageMy = buildMyPage();
         content.addView(pageHome, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
         content.addView(pageRemote, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
-        content.addView(pageAgent, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
         content.addView(pageTerm, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
@@ -7331,12 +4795,10 @@ public class MainActivity extends Activity {
         tabBar.setElevation(dp(8));
         tabHome = makeTab(TabIconView.HOME, 0);
         tabRemote = makeTab(TabIconView.REMOTE, 1);
-        tabAgent = makeTab(TabIconView.AGENT, 2);
-        tabTerm = makeTab(TabIconView.TERM, 3);
-        tabMy = makeTab(TabIconView.MY, 4);
+        tabTerm = makeTab(TabIconView.TERM, 2);
+        tabMy = makeTab(TabIconView.MY, 3);
         tabBar.addView(tabHome);
         tabBar.addView(tabRemote);
-        tabBar.addView(tabAgent);
         tabBar.addView(tabTerm);
         tabBar.addView(tabMy);
         android.widget.FrameLayout.LayoutParams tabLp =
@@ -7363,14 +4825,17 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {
         }
         int lastTab = getSharedPreferences("ui", MODE_PRIVATE).getInt("tab", 0);
-        if (lastTab < 0 || lastTab > 4) lastTab = 0;
+        // v4.23：智能体 tab 已删，旧保存值重映射（2 智能体→主页，
+        // 3 终端→2，4 我的→3），越界归零。
+        if (lastTab == 2) lastTab = 0;
+        else if (lastTab == 3) lastTab = 2;
+        else if (lastTab == 4) lastTab = 3;
+        if (lastTab < 0 || lastTab > 3) lastTab = 0;
         showPage(lastTab);
         // v3.95 横屏：首次进入即按当前方向重排（横屏进分栏，竖屏不变）
         try { applyOrientationLayout(); } catch (Exception ignored) {}
         refreshAll();
 
-        // v3.05：TG 自启已移到 AgentService.onCreate，这里只刷新状态
-        refreshTg();
 
         // v2.50：无 root 不显示终端 tab（Termux 挂载需要 root；后台检测不卡 UI）
         new Thread(() -> {
@@ -7379,7 +4844,7 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     tabTerm.setVisibility(View.GONE);
                     int cur = getSharedPreferences("ui", MODE_PRIVATE).getInt("tab", 0);
-                    if (cur == 3) showPage(0);
+                    if (cur == 2) showPage(0);
                 });
             }
         }).start();
@@ -7407,10 +4872,6 @@ public class MainActivity extends Activity {
                     } else {
                         showTabBarDebounced();
                     }
-                    // v4.10：输入框底部边距跟键盘走（键盘弹起 tab 已藏，
-                    // 再留 84dp 就是漂在键盘上方；键盘收起立刻恢复避让，
-                    // tab 随后从下方滑入正好落到输入框下面）。
-                    updateInputBarBottomMargin(kbVisible);
                     if (kbVisible
                             && pageTerm != null
                             && pageTerm.getVisibility() == View.VISIBLE
@@ -7436,173 +4897,9 @@ public class MainActivity extends Activity {
         refreshSkills();
         refreshSkillCards();
         refreshSchedules();
-        refreshHistory();
         refreshTermuxEnv();
-        refreshLlm();
-        refreshLlmProfiles();
-        renderUserProfile();
-        refreshTg();
     }
 
-    private void refreshLlm() {
-        if (llmBaseUrl == null) return;
-        // 用户正在输入的框不覆盖，避免 onResume 时冲掉未保存的输入
-        if (!llmBaseUrl.hasFocus()) llmBaseUrl.setText(llmStore.getBaseUrl());
-        if (!llmModel.hasFocus()) llmModel.setText(llmStore.getModel());
-        if (llmVisionModel != null && !llmVisionModel.hasFocus())
-            llmVisionModel.setText(llmStore.getVisionModel());
-        if (!llmApiKey.hasFocus()) {
-            llmApiKey.setText("");
-            llmApiKey.setHint("api_key（" + llmStore.getMaskedKey() + "，留空保留）");
-        }
-        llmStatus.setText(llmStore.hasKey()
-                ? "当前：" + llmStore.getActiveName() + "（" + llmProvider + "）" : "未配置");
-        llmStatus.setTextColor(llmStore.hasKey() ? GREEN : TEXT_GRAY);
-        refreshAskModels();
-        if (llmNameInput != null && !llmNameInput.hasFocus()) {
-            llmNameInput.setText(llmStore.getActiveName());
-        }
-    }
-
-    /** 刷新用户画像展示 */
-    private void refreshUserProfile(boolean manual) {
-        if (userProfileBox == null) return;
-        if (manual) {
-            // 手动刷新：后台重新总结
-            log("正在重新总结用户画像…");
-            new Thread(() -> {
-                summarizeUserProfile();
-                runOnUiThread(() -> {
-                    renderUserProfile();
-                    log("用户画像已更新");
-                });
-            }).start();
-            return;
-        }
-        renderUserProfile();
-    }
-
-    private void renderUserProfile() {
-        if (userProfileBox == null || userProfile == null) return;
-        userProfileBox.removeAllViews();
-        if (userProfile.isEmpty()) {
-            userProfileBox.addView(grayText("暂无画像，完成几个任务后自动生成"));
-            return;
-        }
-        if (!userProfile.summary.isEmpty()) {
-            TextView t = new TextView(this);
-            t.setText(userProfile.summary);
-            t.setTextSize(14);
-            t.setTextColor(DyColor.onSurface(this));
-            t.setLineSpacing(dp(2), 1f);
-            t.setPadding(0, dp(4), 0, dp(4));
-            userProfileBox.addView(t);
-        }
-        addProfileSection("🎯 常用任务", userProfile.frequentTasks);
-        addProfileSection("⭐ 偏好", userProfile.preferences);
-        addProfileSection("💡 兴趣", userProfile.interests);
-        addProfileSection("🔁 习惯", userProfile.habits);
-        TextView ts = new TextView(this);
-        ts.setText("更新于 " + userProfile.updatedStr());
-        ts.setTextSize(11);
-        ts.setTextColor(DyColor.onSurfaceVariant(this));
-        ts.setPadding(0, dp(6), 0, 0);
-        userProfileBox.addView(ts);
-    }
-
-    private void addProfileSection(String title, java.util.List<String> items) {
-        if (items == null || items.isEmpty()) return;
-        TextView t = new TextView(this);
-        t.setText(title + "：" + String.join("、", items));
-        t.setTextSize(13);
-        t.setTextColor(DyColor.onSurfaceVariant(this));
-        t.setPadding(0, dp(2), 0, dp(2));
-        userProfileBox.addView(t);
-    }
-
-    /** 后台总结用户画像（LLM） */
-    private void summarizeUserProfile() {
-        try {
-            if (!llmStore.hasKey()) return;
-            // 收集：最近对话 + 最近任务 + 现有画像
-            StringBuilder ctx = new StringBuilder();
-            java.util.List<ChatStore.Msg> msgs = chatStore.currentMsgs();
-            int start = Math.max(0, msgs.size() - 15);
-            ctx.append("最近对话：\n");
-            for (int i = start; i < msgs.size(); i++) {
-                ChatStore.Msg m = msgs.get(i);
-                String txt = m.text.length() > 60
-                        ? m.text.substring(0, 60) + "…" : m.text;
-                ctx.append("- ").append(m.role).append("：").append(txt).append("\n");
-            }
-            ctx.append("\n最近任务：\n");
-            java.util.List<HistoryStore.Entry> hist = historyStore.list();
-            for (int i = 0; i < Math.min(10, hist.size()); i++) {
-                HistoryStore.Entry e = hist.get(i);
-                ctx.append("- ").append(e.title)
-                        .append(e.ok ? "（成功）" : "（未成功）").append("\n");
-            }
-            ctx.append("\n现有画像：\n").append(userProfile.describeForPrompt());
-            String prompt = "你是用户画像分析师。根据以下智能体的记忆"
-                    + "（对话、任务记录、现有画像），总结/更新用户画像。\n\n"
-                    + ctx.toString()
-                    + "\n\n只输出纯 JSON：\n"
-                    + "{\"summary\":\"一句话总结这个用户\","
-                    + "\"interests\":[\"兴趣1\"],"
-                    + "\"habits\":[\"习惯1\"],"
-                    + "\"preferences\":[\"偏好1\"],"
-                    + "\"frequentTasks\":[\"常用任务1\"]}";
-            LlmClient.Result r = llmStore.client().chat(prompt);
-            if (r.ok) userProfile.updateFromJson(r.text);
-        } catch (Exception ignored) {
-        }
-    }
-
-    /** 刷新配置档案列表 */
-    private void refreshLlmProfiles() {
-        if (llmProfilesBox == null) return;
-        llmProfilesBox.removeAllViews();
-        java.util.List<LlmStore.Profile> list = llmStore.list();
-        for (LlmStore.Profile pf : list) {
-            final String pid = pf.id;
-            LinearLayout row = new LinearLayout(this);
-            row.setOrientation(LinearLayout.HORIZONTAL);
-            row.setGravity(Gravity.CENTER_VERTICAL);
-            row.setPadding(dp(4), dp(8), dp(4), dp(8));
-            row.setClickable(true);
-            row.setFocusable(true);
-            boolean active = pf.id.equals(llmStore.getActive().id);
-            LlmStore.Profile supPf = llmStore.supervisorProfile();
-            boolean isSup = supPf != null && pf.id.equals(supPf.id);
-            TextView t = new TextView(this);
-            t.setText((active ? "✓ " : "○ ") + pf.name
-                    + "（" + pf.provider + "/" + pf.model + "）"
-                    + (isSup ? " · 🛡监管" : ""));
-            t.setTextSize(14);
-            t.setTextColor(active ? DyColor.primary(this) : DyColor.onSurface(this));
-            if (active) t.setTypeface(t.getTypeface(),
-                    android.graphics.Typeface.BOLD);
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-            row.addView(t, lp);
-            row.setOnClickListener(v -> {
-                llmStore.setActive(pid);
-                llmNewMode = false;
-                LlmStore.Profile np = llmStore.getActive();
-                llmProvider = np.provider;
-                refreshLlm();
-                refreshLlmProfiles();
-                log("已切换：" + np.name);
-            });
-            row.setOnLongClickListener(v -> {
-                llmStore.setSupervisorId(pid);
-                refreshLlmProfiles();
-                log("监管者模型已设为：" + pf.name + "（长按其他档案可改，默认主力）");
-                return true;
-            });
-            llmProfilesBox.addView(row);
-        }
-    }
 
     @Override
     protected void onPause() {
@@ -7637,8 +4934,7 @@ public class MainActivity extends Activity {
         FloatWindow.setInApp(false);
         // 离开软件且任务在跑：补弹悬浮窗显示进度
         try {
-            if (agentThread != null && agentThread.isAlive()
-                    && !agentStop) {
+            if (runThread != null && runThread.isAlive()) {
                 FloatWindow.assertShown();
             }
         } catch (Exception ignored) {
@@ -7676,17 +4972,8 @@ public class MainActivity extends Activity {
                 startHomeLandTick();
             }
         } catch (Exception ignored) {}
-        new Thread(() -> SedimentReport.checkSchedule(this)).start();
-        try {
-            if (getIntent() != null && getIntent().getBooleanExtra("open_sediment", false)) {
-                getIntent().removeExtra("open_sediment");
-                showSediment();
-            }
-        } catch (Exception ignored) {
-        }
         // 回到软件内：主动关闭任务悬浮窗（进度直接看界面）
         FloatWindow.setInApp(true);
-        if (agentFloatHintRefresher != null) agentFloatHintRefresher.run();
         if (statusView != null) refreshAll();
         // 悬浮抓取返回：展示记录详情
         if (CaptureFloat.pendingCaptureId != null) {
@@ -7697,38 +4984,6 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** 输入栏流光：有流光=任务运行中 */
-    private void startInputFlow() {
-        if (agentInputBar == null) return;
-        stopInputFlow();
-        float density = getResources().getDisplayMetrics().density;
-        agentInputFlow = new FlowLightDrawable(
-                DyColor.surfaceVariant(this), DyColor.primary(this),
-                24, density);
-        agentInputBar.setBackground(agentInputFlow);
-        agentInputFlow.start();
-    }
-
-    private void stopInputFlow() {
-        try {
-            if (agentInputFlow != null) agentInputFlow.stop();
-        } catch (Exception ignored) {
-        }
-        agentInputFlow = null;
-        if (agentInputBar != null && agentInputBg != null) {
-            agentInputBar.setBackground(agentInputBg);
-        }
-    }
-
-    /**
-     * 超时/卡住时主动询问用户是否继续，并阐明原因。
-     * 在后台线程调用，会阻塞等待用户选择。返回 true=继续。
-     */
-    /**
-     * v3.50 第 3 步：低置信澄清对话框（agent 线程调用，UI 线程弹窗阻塞等待）。
-     * 有选项时点选；无选项时让用户自由补充。返回拼好"（用户明确：…）"的重跑目标，
-     * 用户取消返回 null（并置 agentStop）。
-     */
 
     // ---------- v3.74 原生文件输入输出（不走邮箱） ----------
     private void openInboxFile(java.io.File f) {
@@ -7762,43 +5017,6 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void addFileRow(final java.io.File f) {
-        if (agentMsgBox == null) return;
-        android.widget.LinearLayout row = new android.widget.LinearLayout(this);
-        row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
-        row.setGravity(android.view.Gravity.CENTER_VERTICAL);
-        android.widget.TextView tv = new android.widget.TextView(this);
-        tv.setText("📎 " + f.getName() + "（" + f.length() + " 字节）");
-        tv.setTextSize(13);
-        tv.setTextColor(TEXT_DARK);
-        android.widget.LinearLayout.LayoutParams lp = new android.widget.LinearLayout.LayoutParams(
-                0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-        row.addView(tv, lp);
-        android.widget.Button bOpen = smallBtn("打开");
-        bOpen.setOnClickListener(v -> openInboxFile(f));
-        row.addView(bOpen);
-        android.widget.Button bShare = smallBtn("分享");
-        bShare.setOnClickListener(v -> shareInboxFile(f));
-        row.addView(bShare);
-        if (f.getName().toLowerCase().endsWith(".zip")) {
-            android.widget.Button bUnzip = smallBtn("解压");
-            bUnzip.setOnClickListener(v -> new Thread(() -> {
-                try {
-                    final int n = FileInbox.unzipTo(this, f);
-                    runOnUiThread(() -> log("已解压 " + n + " 个文件到收件箱 unzipped/"
-                            + f.getName().replaceAll("(?i)\\.zip$", "") + "/，点文件列表查看"));
-                } catch (Exception e) {
-                    runOnUiThread(() -> log("解压失败：" + e.getMessage()));
-                }
-            }, "file-unzip").start());
-            row.addView(bUnzip);
-        }
-        agentMsgBox.addView(row);
-        if (agentScrollView != null) {
-            agentScrollView.post(() -> agentScrollView.fullScroll(
-                    android.view.View.FOCUS_DOWN));
-        }
-    }
 
     private void showFileListDialog() {
         android.widget.LinearLayout list = new android.widget.LinearLayout(this);
@@ -7836,14 +5054,14 @@ public class MainActivity extends Activity {
             list.addView(row);
         }
         android.widget.TextView outTitle = new android.widget.TextView(this);
-        outTitle.setText("发件箱（Agent 产出的文件）");
+        outTitle.setText("发件箱（任务产出的文件）");
         outTitle.setTextSize(15);
         outTitle.setTypeface(outTitle.getTypeface(), android.graphics.Typeface.BOLD);
         list.addView(outTitle);
         java.util.List<FileInbox.Item> outs = FileInbox.listDir(FileInbox.outboxDir(this), "");
         if (outs.isEmpty()) {
             android.widget.TextView tv = new android.widget.TextView(this);
-            tv.setText("（空）Agent 产出文件后会放在这里");
+            tv.setText("（空）任务产出文件后会放在这里");
             tv.setTextSize(13);
             list.addView(tv);
         }
@@ -7873,143 +5091,7 @@ public class MainActivity extends Activity {
                 .setPositiveButton("关闭", null)
                 .show();
     }
-    private String askClarifyGoal(String goal, AgentLoop loop) {
-        if (agentStop) return null;
-        final String question = loop.clarifyQuestion();
-        final java.util.List<String> opts = loop.clarifyOptions();
-        final String[] result = {null};
-        final java.util.concurrent.CountDownLatch latch =
-                new java.util.concurrent.CountDownLatch(1);
-        runOnUiThread(() -> {
-            // v3.73：澄清对话框重做（2026-10-29 实测 bug）：
-            // 旧版 AlertDialog.setMessage(带序号的全文) + setItems(选项) 在长文本下
-            // 选项列表被挤出可视区、对话框又 setCancelable(false) 盖住聊天输入栏，
-            // 用户既点不到选项、也打不了序号，只能取消任务，死锁。
-            // 新版：问题只显示目标+存疑（去掉“是指：①②③④ 请回复序号”那段，
-            // 那段是 TG/远控打字回复用的，App 里不该出现），选项全部做成
-            // 全宽可点按钮放进 ScrollView，长选项也不会把按钮挤掉；
-            // 再加自由补充输入框 + 确定，返回键也可取消，不再死锁。
-            String shortQ = question;
-            int idx = shortQ.indexOf("，是指：");
-            if (idx >= 0) shortQ = shortQ.substring(0, idx) + "，请选一个：";
-            android.widget.LinearLayout content = new android.widget.LinearLayout(this);
-            content.setOrientation(android.widget.LinearLayout.VERTICAL);
-            int pad = dp(16);
-            content.setPadding(pad, pad, pad, pad);
-            android.widget.TextView qv = new android.widget.TextView(this);
-            qv.setText(shortQ);
-            qv.setTextSize(15);
-            qv.setTextColor(TEXT_DARK);
-            content.addView(qv);
-            final android.app.AlertDialog[] dlg = {null};
-            if (opts != null && !opts.isEmpty()) {
-                for (String opt : opts) {
-                    android.widget.Button ob = new android.widget.Button(this);
-                    ob.setText(opt);
-                    ob.setAllCaps(false);
-                    android.widget.LinearLayout.LayoutParams olp =
-                            new android.widget.LinearLayout.LayoutParams(
-                                    android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT);
-                    olp.setMargins(0, dp(8), 0, 0);
-                    ob.setLayoutParams(olp);
-                    final String chosen = opt;
-                    ob.setOnClickListener(v -> {
-                        result[0] = goal + "（用户明确：" + chosen + "）";
-                        if (dlg[0] != null) dlg[0].dismiss();
-                        latch.countDown();
-                    });
-                    content.addView(ob);
-                }
-            }
-            final android.widget.EditText et = new android.widget.EditText(this);
-            et.setHint("或其他补充说明…");
-            et.setMinLines(2);
-            android.widget.LinearLayout.LayoutParams elp =
-                    new android.widget.LinearLayout.LayoutParams(
-                            android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                            android.widget.LinearLayout.LayoutParams.WRAP_CONTENT);
-            elp.setMargins(0, dp(12), 0, 0);
-            et.setLayoutParams(elp);
-            content.addView(et);
-            android.widget.ScrollView sv = new android.widget.ScrollView(this);
-            sv.addView(content);
-            android.app.AlertDialog.Builder b =
-                    new android.app.AlertDialog.Builder(this)
-                            .setTitle("❓ 需要确认一下")
-                            .setView(sv)
-                            .setCancelable(true)
-                            .setOnCancelListener(d -> {
-                                result[0] = null;
-                                agentStop = true;
-                                latch.countDown();
-                            })
-                            .setPositiveButton("确定", (d, w) -> {
-                                String txt = et.getText().toString().trim();
-                                if (txt.isEmpty()) {
-                                    result[0] = null;
-                                    agentStop = true;
-                                } else {
-                                    result[0] = goal + "（用户明确：" + txt + "）";
-                                }
-                                latch.countDown();
-                            })
-                            .setNegativeButton("取消任务", (d, w) -> {
-                                result[0] = null;
-                                agentStop = true;
-                                latch.countDown();
-                            });
-            dlg[0] = b.show();
-        });
-        try {
-            latch.await();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return null;
-        }
-        return result[0];
-    }
 
-    private boolean askUserContinue(String reason) {
-        // v3.14：优先全局悬浮窗（虚拟屏任务时主屏也能决策）
-        boolean useOverlay = getSharedPreferences("agent", MODE_PRIVATE)
-                .getBoolean("approve_overlay", true);
-        if (useOverlay && ApproveOverlay.canShow(this)) {
-            int r = ApproveOverlay.askCustom(this, "⏳ 任务等待过长（全局）",
-                    reason + "\n是否继续执行？",
-                    new String[]{"继续执行", "停止任务"}, 1);
-            if (r == 1) agentStop = true;
-            boolean go = r == 0;
-            log(go ? "用户选择继续执行" : "用户选择停止任务（全局悬浮窗）");
-            return go;
-        }
-        final boolean[] result = {false};
-        final java.util.concurrent.CountDownLatch latch =
-                new java.util.concurrent.CountDownLatch(1);
-        runOnUiThread(() -> {
-            new android.app.AlertDialog.Builder(this)
-                    .setTitle("⏳ 任务等待过长")
-                    .setMessage(reason + "\n是否继续执行？")
-                    .setPositiveButton("继续执行", (d, w) -> {
-                        result[0] = true;
-                        latch.countDown();
-                    })
-                    .setNegativeButton("停止任务", (d, w) -> {
-                        result[0] = false;
-                        agentStop = true;
-                        latch.countDown();
-                    })
-                    .setCancelable(false)
-                    .show();
-        });
-        try {
-            latch.await();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return false;
-        }
-        return result[0];
-    }
 
     /** 刷新「动作审批」入口行的策略摘要 */
     private void refreshRiskRow() {
@@ -8032,7 +5114,7 @@ public class MainActivity extends Activity {
         box.setPadding(dp(8), dp(8), dp(8), dp(8));
         TextView hint = new TextView(this);
         hint.setText("风险等级由代码固定（防 prompt 注入降级），"
-                + "这里只调每级的处理策略。远程（HTTP/Telegram）进来的任务"
+                + "这里只调每级的处理策略。远程（HTTP）进来的任务"
                 + "无审批人，「每次确认」档会自动拦截。");
         hint.setTextSize(12);
         hint.setTextColor(DyColor.onSurfaceVariant(this));
@@ -8093,18 +5175,27 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** 审批里点"停止任务"时停掉当前本地执行器（技能/技能卡运行）。 */
+    private void stopLocalRunner() {
+        try {
+            TaskRunner r = runner;
+            if (r != null) r.stop();
+        } catch (Exception ignored) {
+        }
+    }
+
     /**
-     * 高风险动作执行前向用户确认（agent 线程调用，UI 线程弹窗阻塞等待）。
+     * 高风险动作执行前向用户确认（任务线程调用，UI 线程弹窗阻塞等待）。
      * 用户停止任务后自动拒绝，避免弹窗卡死后台。
      */
     private boolean askUserApprove(String action, String detail) {
-        if (agentStop) return false;
+        if (localStop) return false;
         // v3.14：优先全局悬浮窗（虚拟屏任务时主屏也能决策）
         boolean useOverlay = getSharedPreferences("agent", MODE_PRIVATE)
                 .getBoolean("approve_overlay", true);
         if (useOverlay && ApproveOverlay.canShow(this)) {
             int r = ApproveOverlay.ask(this, action, detail);
-            if (r == ApproveOverlay.STOP_TASK) agentStop = true;
+            if (r == ApproveOverlay.STOP_TASK) { localStop = true; stopLocalRunner(); }
             if (r == ApproveOverlay.ALLOW_ONCE) {
                 log("✅ 已批准（全局悬浮窗）：" + action);
                 return true;
@@ -8118,7 +5209,7 @@ public class MainActivity extends Activity {
         runOnUiThread(() -> {
             new android.app.AlertDialog.Builder(this)
                     .setTitle("🛡 高风险动作确认")
-                    .setMessage("思考执行员请求执行：\n" + action
+                    .setMessage("本地任务请求执行高风险动作：\n" + action
                             + "\n\n参数：" + detail
                             + "\n\n允许执行一次吗？")
                     .setPositiveButton("允许一次", (d, w) -> {
@@ -8131,7 +5222,8 @@ public class MainActivity extends Activity {
                     })
                     .setNeutralButton("停止任务", (d, w) -> {
                         result[0] = false;
-                        agentStop = true;
+                        localStop = true;
+                        stopLocalRunner();
                         latch.countDown();
                     })
                     .setCancelable(false)
