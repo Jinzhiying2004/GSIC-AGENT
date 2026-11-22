@@ -1,0 +1,9 @@
+{
+  "steps": [
+    {"action": "shell", "command": "echo GSIC-Windows-test", "shell": "cmd"},
+    {"action": "screenshot", "quality": 70},
+    {"action": "window_list"},
+    {"action": "clipboard_set", "text": "GSIC Windows 剪贴板测试"},
+    {"action": "clipboard_get"}
+  ]
+}

@@ -26,3 +26,11 @@ Thumbs.db
 
 # 内置隧道二进制：构建时从官方 releases 拉取，不进版本跟踪
 assets/cloudflared
+
+# GSIC Windows 版构建产物（可重编；推送管线不支持二进制）
+gsic-windows/*.exe
+gsic-windows/*.syso
+gsic-windows/assets/gsic.ico
+gsic-windows/assets/gsic-icon.png
+gsic-windows/installer/gsic.exe
+gsic-windows/installer/gsic.ico

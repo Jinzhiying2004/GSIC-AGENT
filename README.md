@@ -51,7 +51,9 @@ GSIC 自身不内置智能体，只执行、不决策——思考和判断都由
 - **自启动**：开机自动启动服务（Android 开机自启，Windows 注册表 Run 键）
 - **流光彩条**（Android）：任务运行时屏幕边缘显示流光，执行过程看得见
 
-## 构建（Android）
+## 构建
+
+### Android
 
 手工编译链（aapt2 + javac + d8 + apksigner），无需 Gradle / Android Studio。
 
@@ -69,6 +71,20 @@ GSIC 自身不内置智能体，只执行、不决策——思考和判断都由
 
 最低支持 Android 8.0（API 26），完整适配 Android 11。有 root 时执行通道更完整；
 无 root 走无障碍通道。
+
+### Windows
+
+Go 编写，Linux 上交叉编译（`gsic-windows/build.sh` 一步到位）：
+
+```bash
+cd gsic-windows
+./build.sh
+# 产物：gsic-<版本号>-windows-x64.exe 与 GSIC-Setup-<版本号>.exe
+```
+
+依赖：Go 1.25+、Python 3；安装包还需要 makensis（NSIS 3）。
+图标以 base64 内嵌在 `assets/gsic-icon.b64.json`，构建时自动还原。
+详见 [gsic-windows/README.md](gsic-windows/README.md)。
 
 远控 API 说明见 [API.md](API.md)，架构说明见 [ARCHITECTURE.md](ARCHITECTURE.md)，
 版本历史见 [CHANGELOG.md](CHANGELOG.md)。
