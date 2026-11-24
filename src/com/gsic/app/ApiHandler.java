@@ -412,6 +412,16 @@ public class ApiHandler implements AgentHttpServer.Handler {
                             .put("error", String.valueOf(e.getMessage())).toString();
                 }
             }
+            case "/agent-prompt": {
+                // v4.33：连接智能体——与电脑版同款接口。扫码拿到地址 + Token 的
+                // 智能体调它取完整操作说明全文。鉴权已在 handle() 入口统一做
+                //（只认 X-Token 请求头）。
+                if (!"GET".equalsIgnoreCase(method)) {
+                    return new JSONObject().put("ok", false).put("error", "GET required").toString();
+                }
+                return new JSONObject().put("ok", true)
+                        .put("prompt", AgentPrompt.fillPrompt(ctx)).toString();
+            }
             default:
                 return new JSONObject().put("ok", false).put("error", "unknown path").toString();
         }

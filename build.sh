@@ -72,6 +72,23 @@ if [ ! -f assets/cloudflared ] || [ ! -s assets/cloudflared ]; then
 fi
 ls -lh assets/cloudflared
 
+# ZXing core：二维码生成（连接智能体页，com.google.zxing:core:3.5.3）。
+# 二进制 jar 不进 git 推送管线；构建时缺失则从 Maven Central 拉取并校验 sha256。
+ZXING_JAR=libs/core-3.5.3.jar
+ZXING_SHA256=8d8064c1636fdaef7189dd9055c7d59950a8940a12f2293956446ec3c109fd82
+if [ ! -f $ZXING_JAR ] || [ ! -s $ZXING_JAR ]; then
+  echo "== ZXing core 拉取（构建时，Maven Central） =="
+  mkdir -p libs
+  curl -L --max-time 180 -o $ZXING_JAR \
+    https://repo1.maven.org/maven2/com/google/zxing/core/3.5.3/core-3.5.3.jar
+fi
+echo "$ZXING_SHA256  $ZXING_JAR" | sha256sum -c - || {
+  echo "错误：$ZXING_JAR 校验失败（可能下载损坏），删掉重拉" >&2
+  rm -f $ZXING_JAR
+  exit 1
+}
+ls -lh $ZXING_JAR
+
 rm -rf $OUT && mkdir -p $OUT/compiled $OUT/gen $OUT/classes $OUT/dex
 
 echo "== 1/6 aapt2 compile =="
@@ -87,12 +104,12 @@ $BT/aapt2 link -o $OUT/base.apk -I $PLAT \
   --min-sdk-version 26 --target-sdk-version 28
 
 echo "== 3/6 javac =="
-javac -encoding UTF-8 -source 8 -target 8 -nowarn -classpath $PLAT -d $OUT/classes \
+javac -encoding UTF-8 -source 8 -target 8 -nowarn -classpath $PLAT:libs/core-3.5.3.jar -d $OUT/classes \
   $(find src -name "*.java") $(find $OUT/gen -name "*.java")
 
 echo "== 4/6 d8 =="
 $BT/d8 --min-api 26 --lib $PLAT --output $OUT/dex \
-  $(find $OUT/classes -name "*.class")
+  $(find $OUT/classes -name "*.class") libs/core-3.5.3.jar
 
 echo "== 5/6 打包 dex =="
 cp $OUT/base.apk $OUT/app.apk

@@ -2004,6 +2004,7 @@ public class MainActivity extends Activity {
     private LinearLayout buildRemotePage() {
         remoteSections = new java.util.HashMap<>();
         remoteSections.put("svc", buildSvcCard());
+        remoteSections.put("agent", buildAgentConnectCard());
         remoteSections.put("cf", buildCfCard());
         remoteSections.put("tsnet", buildTsnetCard());
         remoteSections.put("relay", buildRelayCard());
@@ -2022,6 +2023,9 @@ public class MainActivity extends Activity {
         remoteSvcSub = addMenuRow(remoteList, "🌐", "远程控制服务",
                 "HTTP 服务开关（端口 " + AgentService.getPort(this) + "）",
                 v -> showRemoteSection("svc"));
+        addMenuRow(remoteList, "🤖", "连接智能体",
+                "二维码 + 一键复制提示词，把手机交给智能体",
+                v -> showRemoteSection("agent"));
         addMenuRow(remoteList, "⚙️", "统一设置", "分组设置 + 变更审计，旧卡入口保留跳转",
                 v -> showRemoteSection("settings"));
         addMenuRow(remoteList, "☁️", "云端操控", "Tailscale 内网被控",
@@ -2075,6 +2079,7 @@ public class MainActivity extends Activity {
         remoteDetailWrap.setVisibility(View.VISIBLE);
         if ("task".equals(key)) startRemoteTaskRefresh();
         else stopRemoteTaskRefresh();
+        if ("agent".equals(key)) refreshAgentConnectCard();
         if ("settings".equals(key)) refreshSettingsInfo();
     }
 
@@ -2433,6 +2438,106 @@ public class MainActivity extends Activity {
         } else {
             tsnetLoginPolling = false;
             tsnetInfo.removeCallbacks(tsnetLoginPoll);
+        }
+    }
+
+    // ---------- 连接智能体（v4.33，与电脑版同款）：二维码 + 一键复制提示词 ----------
+    private android.widget.ImageView agentQrView;
+    private TextView agentInfo, agentWarn;
+
+    private LinearLayout buildAgentConnectCard() {
+        LinearLayout c = card();
+        c.addView(cardTitle("连接智能体"));
+        TextView hint = new TextView(this);
+        hint.setTextSize(14);
+        hint.setTextColor(TEXT_DARK);
+        hint.setText("把二维码拍给你的智能体，或点下面的按钮复制粘贴给它，只需一次。");
+        c.addView(hint);
+        agentWarn = new TextView(this);
+        agentWarn.setTextSize(14);
+        agentWarn.setTextColor(TEXT_DARK);
+        agentWarn.setText("Tailscale 还没拿到地址，先完成登录再复制。");
+        agentWarn.setVisibility(View.GONE);
+        c.addView(agentWarn);
+        agentQrView = new android.widget.ImageView(this);
+        agentQrView.setBackgroundColor(0xFFFFFFFF);
+        agentQrView.setPadding(dp(8), dp(8), dp(8), dp(8));
+        LinearLayout.LayoutParams qrLp = new LinearLayout.LayoutParams(dp(280), dp(280));
+        qrLp.gravity = android.view.Gravity.CENTER_HORIZONTAL;
+        qrLp.topMargin = dp(8);
+        qrLp.bottomMargin = dp(8);
+        c.addView(agentQrView, qrLp);
+        agentInfo = new TextView(this);
+        agentInfo.setTextSize(13);
+        agentInfo.setTextColor(TEXT_DARK);
+        agentInfo.setTextIsSelectable(true);
+        c.addView(agentInfo);
+        Button bCopyPrompt = btn("复制完整提示词");
+        bCopyPrompt.setOnClickListener(v -> {
+            if (TsnetNode.getTailIp() == null || TsnetNode.getTailIp().isEmpty()) {
+                Toast.makeText(this, "Tailscale 还没拿到地址，先完成登录再复制。", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            try {
+                android.content.ClipboardManager cm = (android.content.ClipboardManager)
+                        getSystemService(CLIPBOARD_SERVICE);
+                cm.setPrimaryClip(android.content.ClipData.newPlainText(
+                        "gsic-agent-prompt", AgentPrompt.fillPrompt(this)));
+                Toast.makeText(this, "完整提示词已复制到剪贴板，粘贴给你的智能体即可。", Toast.LENGTH_SHORT).show();
+            } catch (Exception e) {
+                Toast.makeText(this, "复制失败：" + e.getMessage(), Toast.LENGTH_SHORT).show();
+            }
+        });
+        c.addView(bCopyPrompt);
+        Button bCopyAddr = btn("复制地址和 Token");
+        bCopyAddr.setOnClickListener(v -> {
+            String ip = TsnetNode.getTailIp();
+            if (ip == null || ip.isEmpty()) {
+                Toast.makeText(this, "Tailscale 还没拿到地址，先完成登录再复制。", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            try {
+                String token = new TokenManager(this).getToken();
+                android.content.ClipboardManager cm = (android.content.ClipboardManager)
+                        getSystemService(CLIPBOARD_SERVICE);
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("gsic-connect",
+                        AgentPrompt.qrConnectText(ip, AgentService.getPort(this), token)));
+                Toast.makeText(this, "地址和 Token 已复制到剪贴板。", Toast.LENGTH_SHORT).show();
+            } catch (Exception e) {
+                Toast.makeText(this, "复制失败：" + e.getMessage(), Toast.LENGTH_SHORT).show();
+            }
+        });
+        c.addView(bCopyAddr);
+        Button bRefresh = btn("刷新二维码");
+        bRefresh.setOnClickListener(v -> refreshAgentConnectCard());
+        c.addView(bRefresh);
+        return c;
+    }
+
+    /** 每次打开连接智能体页都重算（IP 与 Token 都可能变，扫码永远是最新值）。 */
+    private void refreshAgentConnectCard() {
+        if (agentQrView == null) return;
+        String ip = TsnetNode.getTailIp();
+        if (ip == null || ip.isEmpty()) {
+            agentQrView.setVisibility(View.GONE);
+            if (agentWarn != null) agentWarn.setVisibility(View.VISIBLE);
+            if (agentInfo != null) agentInfo.setText("节点未运行或 IP 获取中。");
+            return;
+        }
+        if (agentWarn != null) agentWarn.setVisibility(View.GONE);
+        try {
+            String token = new TokenManager(this).getToken();
+            int port = AgentService.getPort(this);
+            android.graphics.Bitmap bmp = AgentPrompt.qrBitmap(ip, port, token, 512);
+            agentQrView.setImageBitmap(bmp);
+            agentQrView.setVisibility(View.VISIBLE);
+            if (agentInfo != null) {
+                agentInfo.setText("地址：http://" + ip + ":" + port
+                        + "\nToken：" + TokenManager.mask(token));
+            }
+        } catch (Exception e) {
+            agentQrView.setVisibility(View.GONE);
+            if (agentInfo != null) agentInfo.setText("二维码生成失败：" + e.getMessage());
         }
     }
 
