@@ -1,4 +1,4 @@
-# GSIC Windows 版 v4.41
+# GSIC Windows 版 v4.42
 
 GSIC Windows 版是 Muse 的"手"，运行在 Windows 10/11 x64 PC 上。
 它只执行、不决策：云端 Muse 大脑发步骤过来，它负责操作这台电脑
@@ -12,7 +12,7 @@ GSIC Windows 版是 Muse 的"手"，运行在 Windows 10/11 x64 PC 上。
 - 原生 Windows 图形界面（Walk）：系统托盘图标 + 主窗口
 - 安装包（NSIS）按用户安装，无需管理员权限；开机自启、桌面快捷方式一次到位
 - 自更新：启动时 24 小时节流检查，支持 Muse 推送自动安装
-- 监听 `0.0.0.0:28789`（局域网）+ tailnet IP:28789（远程）
+- 监听 `127.0.0.1:28789`（本机）+ tailnet IP:28789（远程）；局域网默认不放行（`allow_lan` 可开，见下）
 - 日志：`%APPDATA%\GSIC\gsic.log`（GUI 日志页可看最近 100 行）
 - 数据目录：`%APPDATA%\GSIC\`（config.json、skill_cards.json、gsic.log、tailscale/）
 
@@ -67,7 +67,8 @@ Invoke-RestMethod -Uri http://127.0.0.1:28789/task -Method Post `
 | `-data-dir <dir>` | 数据目录（默认 `%APPDATA%\GSIC`） |
 | `-gen-token` | 生成新 token 并保存后退出 |
 | `-no-log-file` | 只输出到控制台，不写日志文件 |
-| `-no-tsnet` | 禁用内置 Tailscale 节点（仅局域网） |
+| `-no-tsnet` | 禁用内置 Tailscale 节点（远程访问随之不可用，除非开 `allow_lan`） |
+| `-allow-lan` | 同时监听所有网卡（局域网可达，默认不开；见「远程访问」） |
 | `-hostname <name>` | tailnet 节点名（默认 gsic-win） |
 | `-no-auto-update` | 禁用自动更新检查 |
 | `-no-gui` | 无界面运行（无托盘图标，纯控制台） |
@@ -86,12 +87,14 @@ Invoke-RestMethod -Uri http://127.0.0.1:28789/task -Method Post `
 
 v4.33 起内置 Tailscale 节点（tsnet），无需另装 Tailscale App：
 - 首次运行在界面显示登录链接，浏览器打开授权后加入 tailnet
+- **v4.42 起可用 Auth Key 加入（不用浏览器登录）**：机器上不了外网、登录不了谷歌时，在 Tailscale 管理控制台（login.tailscale.com）→ 设置 → 密钥 生成 Auth Key，粘贴到主窗口「状态」页 Tailscale 区的 Auth Key 输入框，点「用 Key 加入」；或远程调 `POST /tailscale/authkey {"auth_key": "tskey-auth-..."}`（需 X-Token）。Key 存 config.json（`tailscale_auth_key`，0600），只用于首次加入，已入网的节点忽略它；Key 无效时日志会明确提示。环境变量 `GSIC_TAILSCALE_AUTHKEY` 也可传 Key
 - 节点名默认 `gsic-win`，可通过 `-hostname` 修改
 - 节点状态存在 `%APPDATA%\GSIC\tailscale\`，重启后无需重新登录
-- HTTP 服务同时监听局域网（0.0.0.0:28789）和 tailnet IP:28789
+- HTTP 服务只监听本机回环（127.0.0.1:28789）和 tailnet IP:28789；同一 Wi-Fi 的其他设备默认连不上（与根 README 的安全说明一致）
+- 局域网访问是明确的显式开关：config.json 中 `allow_lan: true`，或加 `-allow-lan` 参数，才会监听 0.0.0.0；此时 token 以明文 HTTP 走局域网，只在受信任的内网开
 - `/status` 返回 tsnet 状态（tsnet_ip、tsnet_running、tsnet_state）
 - 如 PC 上已有外部 Tailscale App 在运行，内置节点与之共存（不同节点名）
-- 禁用内置节点：加 `-no-tsnet` 参数（仅局域网访问）
+- 禁用内置节点：加 `-no-tsnet` 参数（此时远程访问不可用，除非同时开 `allow_lan`）
 
 不要用端口转发把 28789 暴露到公网；远程访问请走 tailnet。
 
@@ -114,6 +117,7 @@ v4.33 起内置 Tailscale 节点（tsnet），无需另装 Tailscale App：
 | `/cards` | GET/POST | 列出/新增（或覆盖）技能卡 |
 | `/card?id=...` | GET/DELETE | 取单个技能卡 / 删除技能卡 |
 | `/agent-prompt` | GET | 返回填好本机连接信息的智能体提示词全文（JSON） |
+| `/tailscale/authkey` | POST | 用 Auth Key 加入 tailnet（body `{"auth_key":"tskey-auth-..."}`，不用浏览器登录） |
 | `/update/check` | GET/POST | 手动检查更新 |
 | `/update/apply` | POST | 下载并应用最新版本（自动重启） |
 | `/update/push` | POST | Muse 推送更新（body `{"version","url","sha256"}`，自动安装开关开时立即安装） |
@@ -201,8 +205,9 @@ POST `/task`，body 为 `{"steps": [...]}` 或裸数组 `[...]`。
 - **推送自动安装**：Muse 通过 POST `/update/push` 推送新版本
   （body `{"version","url","sha256"}`）；`auto_install_updates` 开时
   （默认开）自动下载、验 hash、替换、重启；关时只记录待手动确认
-- **安全**：只从 HTTPS 源下载；hash 不匹配拒绝安装；更新前自动备份旧 exe，
-  替换失败时自动恢复
+- **安全**：只从 HTTPS 源下载；无 hash、hash 格式错误、hash 不匹配都拒绝安装
+  （更新源的 `version-windows.json` 必须带 `sha256`，由 build.sh 生成）；
+  更新前自动备份旧 exe，替换失败时自动恢复
 - **配置**：config.json 中 `auto_update`（默认 true）、`auto_install_updates`
   （默认 true）、`update_source`（默认 GitHub version-windows.json）
 - **禁用**：`-no-auto-update` 参数，或 config.json 中 `auto_update: false`
@@ -254,6 +259,9 @@ rsrc -manifest gsic.manifest -ico assets/gsic.ico -o gsic_windows_amd64.syso
 ```
 
 ## 更新日志
+
+### v4.42（2026-11-26）
+- Auth Key 加入通道：Tailscale Auth Key（tskey-auth-...）可替代浏览器登录入网，解决上不了外网、登录不了谷歌的机器无法加入 tailnet 的问题；入口三处——主窗口「状态」页 Tailscale 区（密码框 +「用 Key 加入」）、`POST /tailscale/authkey`、`GSIC_TAILSCALE_AUTHKEY` 环境变量；Key 存 config.json（0600），不进日志与任何响应；`/status` 新增 `tsnet_authkey_set`（只报有没有，不报 Key 本身）
 
 ### v4.41（2026-11-22）
 - 「连接智能体」页：二维码（地址 + token）+ 一键复制完整提示词/地址；

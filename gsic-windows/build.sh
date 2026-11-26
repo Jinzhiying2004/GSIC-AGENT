@@ -42,4 +42,23 @@ else
   echo "makensis 未找到，跳过安装包（只产出 exe）"
 fi
 
-sha256sum "gsic-$VERSION-windows-x64.exe"
+SHA256=$(sha256sum "gsic-$VERSION-windows-x64.exe" | awk '{print $1}')
+echo "sha256: $SHA256"
+# version-windows.json：自更新源文件。Issue #4 起更新强制要求有效 hash，
+# 此处直接生成，发版时把它作为 Release 附件上传即可（不要手写）。
+python3 - "$VERSION" "$VERSION_CODE" "$SHA256" <<'EOF'
+import json, sys
+version, code, sha = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+info = {
+    "version": version,
+    "versionCode": code,
+    "exeUrl": "https://github.com/Jinzhiying2004/GSIC-AGENT/releases/download/v%s/gsic-%s-windows-x64.exe" % (version, version),
+    "sha256": sha,
+    "notes": "",
+}
+with open("version-windows.json", "w", encoding="utf-8") as f:
+    json.dump(info, f, indent=2)
+    f.write("\n")
+print("已生成 version-windows.json（发版时作为 Release 附件上传）")
+EOF
+python3 -m json.tool version-windows.json > /dev/null && echo "version-windows.json 校验通过"

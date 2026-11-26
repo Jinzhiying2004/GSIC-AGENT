@@ -41,14 +41,90 @@ type TsnetNode struct {
 	urlSince  time.Time
 	running   bool
 	lastState string
+	// authKey is a Tailscale auth key (tskey-auth-...) used to join the
+	// tailnet without interactive login. Set before Start (from config)
+	// or at runtime via RestartWithAuthKey. A node that is already
+	// logged in ignores it; it only takes effect on first join.
+	authKey string
+	// restartCh is signalled (buffered, size 1) when a new auth key is
+	// applied while Start is waiting for login, so the node restarts
+	// with the key instead of waiting for the browser login forever.
+	restartCh chan struct{}
+	// keyWarned tracks whether we already warned that a configured auth
+	// key was not accepted (avoid spamming the log every poll round).
+	keyWarned bool
+}
+
+// errRestartRequested is returned by Start when a new auth key was
+// applied mid-startup; the caller should Start again with the new key.
+var errRestartRequested = fmt.Errorf("restart requested (new auth key)")
+
+// ValidAuthKey reports whether key looks like a Tailscale auth key:
+// "tskey-auth-" followed by a long random part. API keys
+// ("tskey-api-...") are rejected: they cannot join a tailnet.
+func ValidAuthKey(key string) bool {
+	key = strings.TrimSpace(key)
+	if !strings.HasPrefix(key, "tskey-auth-") {
+		return false
+	}
+	// Real auth keys are long (50+ chars); accept >= 30 to leave room
+	// for future formats, but reject obvious fragments.
+	return len(key) >= 30
+}
+
+// SetAuthKey stores the auth key for the next Start. Call before Start
+// (main passes the configured key); for a running node use
+// RestartWithAuthKey instead.
+func (n *TsnetNode) SetAuthKey(key string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.authKey = strings.TrimSpace(key)
+}
+
+// AuthKeySet reports whether an auth key is configured (never returns
+// the key itself).
+func (n *TsnetNode) AuthKeySet() bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.authKey != ""
+}
+
+// RestartWithAuthKey applies a new auth key and restarts the node with
+// it. If the node is already Running, the key is only stored (it takes
+// effect on the next start); returns alreadyRunning=true. Otherwise it
+// interrupts the pending login wait and the caller should Start again
+// (main's tsnet loop does that); returns alreadyRunning=false.
+func (n *TsnetNode) RestartWithAuthKey(key string) (alreadyRunning bool, err error) {
+	key = strings.TrimSpace(key)
+	if !ValidAuthKey(key) {
+		return false, fmt.Errorf("invalid auth key: expected tskey-auth-... (an auth key, not an API key)")
+	}
+	n.mu.Lock()
+	running := n.running
+	n.authKey = key
+	n.keyWarned = false
+	n.mu.Unlock()
+	if running {
+		return true, nil
+	}
+	// Interrupt the pending login wait: Close the server (its status
+	// calls start failing) and signal the restart; waitForLogin turns
+	// either into errRestartRequested.
+	n.Close()
+	select {
+	case n.restartCh <- struct{}{}:
+	default:
+	}
+	return false, nil
 }
 
 // NewTsnetNode creates a node. stateDir is the tsnet state directory
 // (e.g. %APPDATA%\GSIC\tailscale). hostname is the tailnet node name.
 func NewTsnetNode(stateDir, hostname string) *TsnetNode {
 	return &TsnetNode{
-		stateDir: stateDir,
-		hostname: hostname,
+		stateDir:  stateDir,
+		hostname:  hostname,
+		restartCh: make(chan struct{}, 1),
 	}
 }
 
@@ -66,6 +142,7 @@ func (n *TsnetNode) Start() error {
 	srv := &tsnet.Server{
 		Hostname: n.hostname,
 		Dir:      n.stateDir,
+		AuthKey:  n.authKey,
 		Logf: func(format string, args ...any) {
 			msg := fmt.Sprintf(format, args...)
 			// tsnet prints "go to: <url>" when login is needed.
@@ -91,10 +168,14 @@ func (n *TsnetNode) Start() error {
 		return fmt.Errorf("tsnet local client: %w", err)
 	}
 
-	// Wait for Running + IP. First run needs interactive login.
+	// Wait for Running + IP. First run needs interactive login, unless
+	// an auth key was configured (then the node joins on its own).
 	ip, err := n.waitForLogin(lc)
 	if err != nil {
 		srv.Close()
+		if err == errRestartRequested {
+			return errRestartRequested
+		}
 		return err
 	}
 
@@ -102,6 +183,7 @@ func (n *TsnetNode) Start() error {
 	n.tailIP = ip
 	n.running = true
 	n.lastState = "Running"
+	n.loginURL = ""
 	n.mu.Unlock()
 
 	Logf("tsnet: node %q online, tailnet IP %s", n.hostname, ip)
@@ -109,15 +191,23 @@ func (n *TsnetNode) Start() error {
 }
 
 // waitForLogin polls LocalClient Status until BackendState is Running
-// with a tailnet IP. It logs the auth URL when NeedsLogin.
+// with a tailnet IP. It logs the auth URL when NeedsLogin. It returns
+// errRestartRequested promptly when a new auth key is applied mid-wait
+// (RestartWithAuthKey), so the caller can restart with the key instead
+// of waiting for the browser login forever.
 func (n *TsnetNode) waitForLogin(lc *local.Client) (string, error) {
 	for {
 		st, err := lc.Status(context.Background())
 		if err != nil {
+			if n.restartRequested() {
+				return "", errRestartRequested
+			}
 			return "", fmt.Errorf("tsnet status: %w", err)
 		}
 		if st == nil {
-			time.Sleep(2 * time.Second)
+			if !n.sleepOrRestart(2 * time.Second) {
+				return "", errRestartRequested
+			}
 			continue
 		}
 		n.mu.Lock()
@@ -133,8 +223,45 @@ func (n *TsnetNode) waitForLogin(lc *local.Client) (string, error) {
 			// Running but no IP yet: wait one more round.
 		} else if st.AuthURL != "" {
 			n.reportURL(st.AuthURL)
+			// An auth key was configured but the node still needs a
+			// browser login: the key was rejected (or is for another
+			// tailnet). Say so once, so the user stops waiting on it.
+			n.mu.Lock()
+			keySet := n.authKey != ""
+			warned := n.keyWarned
+			if keySet && !warned {
+				n.keyWarned = true
+			}
+			n.mu.Unlock()
+			if keySet && !warned {
+				Logf("tsnet: auth key was not accepted (still needs browser login); check the key and the tailnet it belongs to")
+			}
 		}
-		time.Sleep(2 * time.Second)
+		if !n.sleepOrRestart(2 * time.Second) {
+			return "", errRestartRequested
+		}
+	}
+}
+
+// restartRequested reports whether a restart was signalled (and
+// consumes the signal).
+func (n *TsnetNode) restartRequested() bool {
+	select {
+	case <-n.restartCh:
+		return true
+	default:
+		return false
+	}
+}
+
+// sleepOrRestart waits d unless a restart is signalled first.
+// It returns false when a restart was signalled.
+func (n *TsnetNode) sleepOrRestart(d time.Duration) bool {
+	select {
+	case <-n.restartCh:
+		return false
+	case <-time.After(d):
+		return true
 	}
 }
 

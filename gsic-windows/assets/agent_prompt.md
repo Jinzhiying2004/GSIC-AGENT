@@ -24,6 +24,7 @@
 - `GET /dir?path=...` —— 列目录
 - `GET /cards` —— 技能卡列表（设备上存好的常用多步流程）；`POST /card` 新建技能卡
 - `GET /agent-prompt` —— 取回这份提示词全文（说明丢了时重新取）
+- `POST /tailscale/authkey {"auth_key": "tskey-auth-..."}` —— 用 Tailscale Auth Key 加入 tailnet（不用浏览器登录；设备登录不了谷歌时用这个，Key 在 Tailscale 管理控制台 → 设置 → 密钥 生成）
 - `GET /update/check` / `POST /update/apply` —— 检查/安装 GSIC 更新
 
 ## POST /task：动作列表

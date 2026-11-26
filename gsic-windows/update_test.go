@@ -3,6 +3,8 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -129,10 +131,14 @@ func TestConfigUpdateFields(t *testing.T) {
 	if cfg.UpdateChannel != "stable" {
 		t.Errorf("UpdateChannel default = %q", cfg.UpdateChannel)
 	}
+	if cfg.AllowLAN {
+		t.Errorf("AllowLAN default should be false (Issue #2: loopback only)")
+	}
 	// Round-trip through Save.
 	cfg.AutoUpdate = false
 	cfg.AutoInstallUpdates = false
 	cfg.UpdateSource = "https://example.com/v.json"
+	cfg.AllowLAN = true
 	if err := cfg.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -148,5 +154,82 @@ func TestConfigUpdateFields(t *testing.T) {
 	}
 	if cfg2.UpdateSource != "https://example.com/v.json" {
 		t.Errorf("UpdateSource not persisted: %q", cfg2.UpdateSource)
+	}
+	if !cfg2.AllowLAN {
+		t.Errorf("AllowLAN not persisted")
+	}
+}
+
+// TestValidSHA256 covers the Issue #4 format gate: missing, short,
+// long, non-hex and whitespace-padded digests are all rejected; only
+// a 64-char hex digest (either case) passes.
+func TestValidSHA256(t *testing.T) {
+	valid := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	cases := map[string]bool{
+		"":                       false,
+		"abc123":                 false,
+		valid:                    true,
+		strings.ToUpper(valid):   true,
+		strings.Repeat("0", 63):  false,
+		strings.Repeat("0", 65):  false,
+		strings.Repeat("g", 64):  false,
+		" " + valid:              false,
+		valid + " ":              false,
+		strings.Repeat("a1", 32): true,
+		"zz3456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": false,
+	}
+	for in, want := range cases {
+		if got := validSHA256(in); got != want {
+			t.Errorf("validSHA256(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+// TestHandleUpdatePushRequiresSHA256 covers the Issue #4 entry gate:
+// /update/push rejects a missing or malformed hash with 400 and
+// records nothing; a valid hash with auto-install off is recorded
+// as pending. No download is attempted in any case.
+func TestHandleUpdatePushRequiresSHA256(t *testing.T) {
+	cfg := &Config{Port: 28789, Token: "test-token-1234567890abcdef", AutoInstallUpdates: false}
+	srv := NewServer(cfg, nil)
+	srv.SetUpdater(NewUpdater(cfg))
+	h := srv.Handler()
+	doPush := func(token, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/update/push", strings.NewReader(body))
+		req.Header.Set("X-Token", token)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	valid := strings.Repeat("a1", 32)
+
+	rec := doPush(cfg.Token, `{"version":"4.99","url":"https://example.com/gsic.exe"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("missing sha256: status = %d, want 400", rec.Code)
+	}
+	if srv.updater.Pending() != nil {
+		t.Errorf("missing sha256: push was recorded as pending")
+	}
+
+	rec = doPush(cfg.Token, `{"version":"4.99","url":"https://example.com/gsic.exe","sha256":"xyz"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("malformed sha256: status = %d, want 400", rec.Code)
+	}
+	if srv.updater.Pending() != nil {
+		t.Errorf("malformed sha256: push was recorded as pending")
+	}
+
+	rec = doPush(cfg.Token, `{"version":"4.99","url":"https://example.com/gsic.exe","sha256":"`+valid+`"}`)
+	if rec.Code != http.StatusOK {
+		t.Errorf("valid sha256: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	p := srv.updater.Pending()
+	if p == nil || p.SHA256 != valid || p.URL != "https://example.com/gsic.exe" {
+		t.Errorf("valid sha256: pending = %+v", p)
+	}
+
+	rec = doPush("wrong-token", `{"version":"4.99","url":"https://example.com/gsic.exe","sha256":"`+valid+`"}`)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("wrong token: status = %d, want 401", rec.Code)
 	}
 }

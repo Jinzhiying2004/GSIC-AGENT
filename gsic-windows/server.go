@@ -65,6 +65,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/update/check", s.auth(s.handleUpdateCheck))
 	mux.HandleFunc("/update/apply", s.auth(s.handleUpdateApply))
 	mux.HandleFunc("/update/push", s.auth(s.handleUpdatePush))
+	mux.HandleFunc("/tailscale/authkey", s.auth(s.handleTailscaleAuthKey))
 	return mux
 }
 
@@ -167,10 +168,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		resp["tsnet_running"] = s.tsnet.IsRunning()
 		resp["tsnet_ip"] = s.tsnet.TailIP()
 		resp["tsnet_state"] = s.tsnet.State()
+		// Whether an auth key is saved (never the key itself).
+		resp["tsnet_authkey_set"] = s.tsnet.AuthKeySet()
 	} else {
 		resp["tsnet_running"] = false
 		resp["tsnet_ip"] = ""
 		resp["tsnet_state"] = "disabled"
+		resp["tsnet_authkey_set"] = false
 	}
 	if fg := ForegroundWindow(); fg != nil {
 		resp["foreground_window"] = fg
@@ -595,6 +599,13 @@ func (s *Server) handleUpdatePush(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "missing url")
 		return
 	}
+	// Issue #4: a push without a valid hash is rejected here, before
+	// it can be recorded as pending or installed; a pending update
+	// without a hash could never be applied anyway.
+	if !validSHA256(p.SHA256) {
+		writeErr(w, http.StatusBadRequest, "missing or invalid sha256 (64 hex chars required)")
+		return
+	}
 	Logf("update push received: version=%s url=%s", p.Version, p.URL)
 	if !s.cfg.AutoInstallUpdates {
 		// Record only; the user (or Muse) applies it later via /update/apply.
@@ -617,6 +628,71 @@ func (s *Server) handleUpdatePush(w http.ResponseWriter, r *http.Request) {
 		Logf("update: exiting for restart (pushed update)")
 		os.Exit(0)
 	}()
+}
+
+// handleTailscaleAuthKey saves a Tailscale auth key and joins the
+// tailnet with it (POST {"auth_key": "tskey-auth-..."}). This is the
+// way to join on a machine that cannot open the browser login (e.g.
+// its Google sign-in needs foreign network): generate the key in the
+// Tailscale admin console on a machine that can reach it, then send
+// it here. The key is a secret: it is stored in config.json (0600)
+// and never returned in any response.
+func (s *Server) handleTailscaleAuthKey(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "POST only")
+		return
+	}
+	if s.tsnet == nil {
+		writeErr(w, http.StatusServiceUnavailable, "built-in Tailscale is disabled (-no-tsnet)")
+		return
+	}
+	var p struct {
+		AuthKey string `json:"auth_key"`
+	}
+	if err := readBodyJSON(r, &p); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad JSON: %v", err)
+		return
+	}
+	key := strings.TrimSpace(p.AuthKey)
+	if !ValidAuthKey(key) {
+		writeErr(w, http.StatusBadRequest, "invalid auth key: expected tskey-auth-... (an auth key, not an API key)")
+		return
+	}
+	// Persist first: even an already-running node keeps the key for
+	// the next start.
+	s.cfg.TailscaleAuthKey = key
+	if err := s.cfg.Save(); err != nil {
+		writeErr(w, http.StatusInternalServerError, "save config: %v", err)
+		return
+	}
+	if s.tsnet.IsRunning() {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"ok": true, "already_running": true,
+			"tsnet_state": s.tsnet.State(), "tsnet_ip": s.tsnet.TailIP(),
+			"message": "already on the tailnet; auth key saved for the next start",
+		})
+		return
+	}
+	alreadyRunning, err := s.tsnet.RestartWithAuthKey(key)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "%v", err)
+		return
+	}
+	if alreadyRunning {
+		// Raced with the node coming up; same outcome as above.
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"ok": true, "already_running": true,
+			"tsnet_state": s.tsnet.State(), "tsnet_ip": s.tsnet.TailIP(),
+			"message": "already on the tailnet; auth key saved for the next start",
+		})
+		return
+	}
+	Logf("tailscale: auth key applied, rejoining tailnet")
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"ok": true, "already_running": false,
+		"tsnet_state": s.tsnet.State(), "tsnet_ip": s.tsnet.TailIP(),
+		"message": "auth key saved, rejoining tailnet (poll /status for tsnet_ip)",
+	})
 }
 
 func newTaskID() string {

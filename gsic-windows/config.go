@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -26,11 +27,26 @@ type Config struct {
 	UpdateChannel      string    `json:"update_channel"`
 	UpdateSource       string    `json:"update_source"`
 	LastUpdateCheck    time.Time `json:"last_update_check"`
-	DataDir            string    `json:"-"`
-	ConfigPath         string    `json:"-"`
-	CardsPath          string    `json:"-"`
-	LogPath            string    `json:"-"`
-	TokenGenerated     bool      `json:"-"`
+	// TailscaleAuthKey is a Tailscale auth key (tskey-auth-...) used to
+	// join the tailnet without interactive browser login. Needed on
+	// machines that cannot reach the login page (e.g. no foreign
+	// network for the Google sign-in): generate the key in the
+	// Tailscale admin console (Settings -> Keys) on a machine that can
+	// reach it, then paste it here / in the GUI / via
+	// POST /tailscale/authkey. It is a secret like the token: stored in
+	// config.json (0600), never logged, never sent in any response.
+	// Empty means interactive login (the login URL flow). An existing
+	// logged-in node ignores it; it only takes effect on first join.
+	TailscaleAuthKey string `json:"tailscale_auth_key,omitempty"`
+	// AllowLAN re-opens the plain HTTP listener on all interfaces
+	// (Issue #2: default false — loopback only, remote access goes
+	// through the built-in Tailscale node, like Android GSIC).
+	AllowLAN       bool   `json:"allow_lan"`
+	DataDir        string `json:"-"`
+	ConfigPath     string `json:"-"`
+	CardsPath      string `json:"-"`
+	LogPath        string `json:"-"`
+	TokenGenerated bool   `json:"-"`
 }
 
 type configFile struct {
@@ -41,6 +57,8 @@ type configFile struct {
 	UpdateChannel      string    `json:"update_channel,omitempty"`
 	UpdateSource       string    `json:"update_source,omitempty"`
 	LastUpdateCheck    time.Time `json:"last_update_check,omitempty"`
+	AllowLAN           *bool     `json:"allow_lan,omitempty"`
+	TailscaleAuthKey   string    `json:"tailscale_auth_key,omitempty"`
 }
 
 // DefaultDataDir returns %APPDATA%\GSIC on Windows and
@@ -93,6 +111,10 @@ func LoadConfig(flagPort int, flagToken, flagDataDir string) (*Config, error) {
 			cfg.UpdateSource = fileCfg.UpdateSource
 		}
 		cfg.LastUpdateCheck = fileCfg.LastUpdateCheck
+		if fileCfg.AllowLAN != nil {
+			cfg.AllowLAN = *fileCfg.AllowLAN
+		}
+		cfg.TailscaleAuthKey = fileCfg.TailscaleAuthKey
 	}
 
 	// 2. env
@@ -103,6 +125,9 @@ func LoadConfig(flagPort int, flagToken, flagDataDir string) (*Config, error) {
 	}
 	if v := os.Getenv("GSIC_TOKEN"); v != "" {
 		cfg.Token = v
+	}
+	if v := os.Getenv("GSIC_TAILSCALE_AUTHKEY"); v != "" {
+		cfg.TailscaleAuthKey = strings.TrimSpace(v)
 	}
 
 	// 3. flags (highest)
@@ -132,6 +157,7 @@ func LoadConfig(flagPort int, flagToken, flagDataDir string) (*Config, error) {
 func (c *Config) Save() error {
 	auto := c.AutoUpdate
 	autoInstall := c.AutoInstallUpdates
+	allowLAN := c.AllowLAN
 	data, err := json.MarshalIndent(configFile{
 		Port:               c.Port,
 		Token:              c.Token,
@@ -140,6 +166,8 @@ func (c *Config) Save() error {
 		UpdateChannel:      c.UpdateChannel,
 		UpdateSource:       c.UpdateSource,
 		LastUpdateCheck:    c.LastUpdateCheck,
+		AllowLAN:           &allowLAN,
+		TailscaleAuthKey:   c.TailscaleAuthKey,
 	}, "", "  ")
 	if err != nil {
 		return err

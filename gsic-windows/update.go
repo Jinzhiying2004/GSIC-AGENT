@@ -34,6 +34,10 @@ const UpdateCheckInterval = 24 * time.Hour
 //
 //	"exeUrl":"https://github.com/Jinzhiying2004/GSIC-AGENT/releases/download/v4.34/gsic-4.34-windows-x64.exe",
 //	"sha256":"<hex>","notes":"..."}
+//
+// sha256 is mandatory (Issue #4, 2026-11-25 feedback): Check, Apply,
+// ApplyPushed and /update/push all refuse an update without a valid
+// 64-hex digest; build.sh prints the digest for the Release file.
 type versionInfo struct {
 	Version     string `json:"version"`
 	VersionCode int    `json:"versionCode"`
@@ -167,6 +171,13 @@ func (u *Updater) Check() UpdateStatus {
 		u.status = UpdateStatus{CurrentCode: VersionCode, CheckedAt: time.Now(), Error: "exeUrl must be HTTPS"}
 		return u.status
 	}
+	// Issue #4: a version without a usable hash is not safely
+	// installable, so the check fails loudly instead of reporting
+	// an update that Apply would then refuse.
+	if !validSHA256(info.SHA256) {
+		u.status = UpdateStatus{CurrentCode: VersionCode, CheckedAt: time.Now(), Error: "version JSON missing valid sha256, update refused"}
+		return u.status
+	}
 
 	u.lastCheck = time.Now()
 	u.cfg.LastUpdateCheck = u.lastCheck
@@ -218,6 +229,12 @@ func (u *Updater) ApplyPushed(version, url, sha256 string) error {
 	if !strings.HasPrefix(url, "https://") {
 		return fmt.Errorf("pushed URL must be HTTPS")
 	}
+	// Issue #4: a pushed update without a valid hash is refused
+	// before any download, so unverified content can never reach
+	// the swap step.
+	if !validSHA256(sha256) {
+		return fmt.Errorf("pushed update requires a valid sha256 (missing or malformed)")
+	}
 	u.applying = true
 	defer func() { u.applying = false }()
 
@@ -239,15 +256,12 @@ func (u *Updater) ApplyPushed(version, url, sha256 string) error {
 	if err := u.download(url, newExe); err != nil {
 		return fmt.Errorf("download: %w", err)
 	}
-	if sha256 != "" {
-		if err := verifySHA256(newExe, sha256); err != nil {
-			_ = os.Remove(newExe)
-			return fmt.Errorf("hash verification failed: %w", err)
-		}
-		Logf("update: sha256 verified (pushed)")
-	} else {
-		Logf("update: WARNING pushed update has no sha256, skipping verification")
+	// Hash is mandatory (checked above); verify before backup/swap.
+	if err := verifySHA256(newExe, sha256); err != nil {
+		_ = os.Remove(newExe)
+		return fmt.Errorf("hash verification failed: %w", err)
 	}
+	Logf("update: sha256 verified (pushed)")
 	if err := copyFile(exePath, backupExe); err != nil {
 		_ = os.Remove(newExe)
 		return fmt.Errorf("backup current exe: %w", err)
@@ -312,6 +326,11 @@ func (u *Updater) Apply() error {
 	if info.VersionCode != st.LatestCode {
 		return fmt.Errorf("version changed during update (check said %d, source now %d)", st.LatestCode, info.VersionCode)
 	}
+	// Issue #4: re-fetched info must carry a valid hash too; Check
+	// already validated it, but the source may have changed since.
+	if !validSHA256(info.SHA256) {
+		return fmt.Errorf("version info missing valid sha256, refusing update")
+	}
 
 	u.applying = true
 	defer func() { u.applying = false }()
@@ -336,16 +355,12 @@ func (u *Updater) Apply() error {
 		return fmt.Errorf("download: %w", err)
 	}
 
-	// 2. Verify hash (when the source provides one).
-	if info.SHA256 != "" {
-		if err := verifySHA256(newExe, info.SHA256); err != nil {
-			_ = os.Remove(newExe)
-			return fmt.Errorf("hash verification failed: %w", err)
-		}
-		Logf("update: sha256 verified")
-	} else {
-		Logf("update: WARNING no sha256 in version info, skipping verification")
+	// 2. Verify hash (mandatory, Issue #4: no hash, no install).
+	if err := verifySHA256(newExe, info.SHA256); err != nil {
+		_ = os.Remove(newExe)
+		return fmt.Errorf("hash verification failed: %w", err)
 	}
+	Logf("update: sha256 verified")
 
 	// 3. Back up the current exe.
 	if err := copyFile(exePath, backupExe); err != nil {
@@ -430,6 +445,21 @@ func (u *Updater) download(url, dest string) error {
 		return fmt.Errorf("downloaded empty file")
 	}
 	return nil
+}
+
+// validSHA256 reports whether s is a 64-char hex digest.
+// Issue #4 (2026-11-25 feedback): a missing or malformed hash must
+// refuse the update on every path, never silently skip verification.
+func validSHA256(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 // verifySHA256 checks a file against a hex SHA256 digest.

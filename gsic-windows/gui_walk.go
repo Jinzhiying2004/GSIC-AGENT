@@ -42,6 +42,9 @@ type WalkMainWindow struct {
 	leLoginURL    *walk.LineEdit
 	btnLoginURL   *walk.PushButton
 	loginShown     bool
+	leAuthKey      *walk.LineEdit
+	lblAuthKey     *walk.Label
+	btnAuthKey     *walk.PushButton
 
 	// Connect tab widgets.
 	ivQR          *walk.ImageView
@@ -142,8 +145,25 @@ func NewWalkMainWindow(cfg *Config, cards *CardStore, updater *Updater, gui *GUI
 											},
 										},
 									},
+									Label{Text: "Auth Key："},
+									Composite{
+										Layout: HBox{},
+										Children: []Widget{
+											LineEdit{AssignTo: &mw.leAuthKey, PasswordMode: true, Text: ""},
+											PushButton{
+												AssignTo: &mw.btnAuthKey,
+												Text:     "用 Key 加入",
+												OnClicked: func() {
+													mw.applyAuthKey()
+												},
+											},
+										},
+									},
+									Label{Text: "Key 状态："},
+									Label{AssignTo: &mw.lblAuthKey, Text: "-"},
 								},
 							},
+							Label{Text: "登录不了谷歌时：去 Tailscale 管理控制台（login.tailscale.com）→ 设置 → 密钥，生成 Auth Key 粘贴到上面，点「用 Key 加入」即可入网，不用浏览器登录。"},
 							GroupBox{
 								Title:  "安全",
 								Layout: Grid{Columns: 2},
@@ -439,6 +459,11 @@ func (mw *WalkMainWindow) refreshStatus() {
 			ip = "-"
 		}
 		mw.lblTsnetIP.SetText(ip)
+		if mw.cfg.TailscaleAuthKey != "" {
+			mw.lblAuthKey.SetText("已保存")
+		} else {
+			mw.lblAuthKey.SetText("未设置")
+		}
 		// First-run login: show the auth URL (bearer credential, GUI
 		// only, never over HTTP) and pop the window once so the user
 		// sees it. No console exists in the installed build.
@@ -551,6 +576,41 @@ func (mw *WalkMainWindow) copyConnectShort() {
 		return
 	}
 	walk.MsgBox(mw.MainWindow, "已复制", "地址和 Token 已复制到剪贴板。", walk.MsgBoxIconInformation)
+}
+
+// applyAuthKey saves the pasted Tailscale auth key and rejoins the
+// tailnet with it (no browser login needed).
+func (mw *WalkMainWindow) applyAuthKey() {
+	key := strings.TrimSpace(mw.leAuthKey.Text())
+	if key == "" {
+		walk.MsgBox(mw.MainWindow, "没有 Key", "先粘贴 Auth Key（tskey-auth- 开头）。", walk.MsgBoxIconWarning)
+		return
+	}
+	if !ValidAuthKey(key) {
+		walk.MsgBox(mw.MainWindow, "Key 不对", "这不是 Auth Key：应以 tskey-auth- 开头。注意是 Auth Key，不是 API Key（tskey-api-）。", walk.MsgBoxIconWarning)
+		return
+	}
+	if mw.tsnet == nil {
+		walk.MsgBox(mw.MainWindow, "Tailscale 未启用", "内置 Tailscale 节点未启用，无法用 Key 加入。", walk.MsgBoxIconWarning)
+		return
+	}
+	mw.cfg.TailscaleAuthKey = key
+	if err := mw.cfg.Save(); err != nil {
+		walk.MsgBox(mw.MainWindow, "保存失败", fmt.Sprintf("无法保存配置：%v", err), walk.MsgBoxIconError)
+		return
+	}
+	mw.leAuthKey.SetText("")
+	if mw.tsnet.IsRunning() {
+		mw.refreshStatus()
+		walk.MsgBox(mw.MainWindow, "已在通道中", "本机已在通道里，Key 已保存，下次启动备用。", walk.MsgBoxIconInformation)
+		return
+	}
+	if _, err := mw.tsnet.RestartWithAuthKey(key); err != nil {
+		walk.MsgBox(mw.MainWindow, "加入失败", err.Error(), walk.MsgBoxIconError)
+		return
+	}
+	mw.refreshStatus()
+	walk.MsgBox(mw.MainWindow, "正在加入", "Key 已保存，正在用 Key 重新加入通道，稍等片刻看状态。", walk.MsgBoxIconInformation)
 }
 
 // refreshLog reloads the log text from the GUI buffer.
