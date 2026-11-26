@@ -38,6 +38,8 @@ var (
 	procBitBlt                 = modGdi32.NewProc("BitBlt")
 	procGetDIBits              = modGdi32.NewProc("GetDIBits")
 	procDeleteObject           = modGdi32.NewProc("DeleteObject")
+
+	procSetThreadExecutionState = modKernel32.NewProc("SetThreadExecutionState")
 	procDeleteDC               = modGdi32.NewProc("DeleteDC")
 
 	procGlobalAlloc  = modKernel32.NewProc("GlobalAlloc")

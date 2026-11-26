@@ -1,4 +1,4 @@
-# GSIC Windows 版 v4.42
+# GSIC Windows 版 v4.43
 
 GSIC Windows 版是 Muse 的"手"，运行在 Windows 10/11 x64 PC 上。
 它只执行、不决策：云端 Muse 大脑发步骤过来，它负责操作这台电脑
@@ -259,6 +259,9 @@ rsrc -manifest gsic.manifest -ico assets/gsic.ico -o gsic_windows_amd64.syso
 ```
 
 ## 更新日志
+
+### v4.43（2026-11-27）
+- 防休眠：GSIC 运行任务（/task、/shell）时电脑不休眠/睡眠，空闲 10 分钟后恢复正常休眠（按量付费云电脑省钱）；实现两层——SetThreadExecutionState（ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED）阻止 Windows 睡眠 + 每分钟一次零位移鼠标移动重置云平台的输入空闲计时（不移动光标，不干扰点击）；`/status` 新增 `keep_awake`（当前是否持有防休眠锁）
 
 ### v4.42（2026-11-26）
 - Auth Key 加入通道：Tailscale Auth Key（tskey-auth-...）可替代浏览器登录入网，解决上不了外网、登录不了谷歌的机器无法加入 tailnet 的问题；入口三处——主窗口「状态」页 Tailscale 区（密码框 +「用 Key 加入」）、`POST /tailscale/authkey`、`GSIC_TAILSCALE_AUTHKEY` 环境变量；Key 存 config.json（0600），不进日志与任何响应；`/status` 新增 `tsnet_authkey_set`（只报有没有，不报 Key 本身）

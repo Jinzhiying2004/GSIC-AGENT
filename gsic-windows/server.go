@@ -161,6 +161,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"mouse":          map[string]int{"x": mx, "y": my},
 		"cards":          len(s.cards.List()),
 		"token_auth":     true,
+		"keep_awake":     KeepAwakeActive(),
 	}
 	// Built-in Tailscale status (no login URL: it's a bearer secret,
 	// it only goes to the log file/console, never to HTTP).
@@ -233,6 +234,10 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 
 	taskID := newTaskID()
 	Logf("task %s: %d steps (stop_on_error=%v)", taskID, len(req.Steps), stopOnError)
+
+	// While GSIC runs tasks the PC must not sleep; it may sleep again
+	// after 10 minutes idle (pay-per-use cloud desktop).
+	NoteTaskActivity()
 
 	// Serialize tasks: two tasks driving one mouse/keyboard would garble
 	// each other. A second task waits for the first to finish.
@@ -469,6 +474,7 @@ func (s *Server) handleShell(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "empty command")
 		return
 	}
+	NoteTaskActivity()
 	res, err := RunCommand(p.Command, p.Shell, p.Timeout)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "%v", err)
