@@ -46,10 +46,20 @@ func keepAwakeRelease() {
 	_, _, _ = procSetThreadExecutionState.Call(uintptr(esContinuous))
 }
 
-// pokeInput sends a zero-delta mouse move. It counts as user input
-// (resets the idle timer) without moving the cursor.
+// pokeInput moves the cursor 1 pixel and back. It must be a real move:
+// a zero-delta move does NOT reset the cloud platform's idle timer
+// (proven 2026-11-27: the VM slept at ~07:23 despite the zero-delta poke).
+// The cursor returns to its original spot, so a task's clicks are not
+// disturbed.
 func pokeInput() {
-	_ = sendInputs([]winInput{newMouseInput(mouseMove, 0)})
+	x, y := GetMousePos()
+	sw, _ := ScreenSize()
+	if x < sw-1 {
+		_ = MoveMouse(x+1, y)
+	} else {
+		_ = MoveMouse(x-1, y)
+	}
+	_ = MoveMouse(x, y)
 }
 
 // NoteTaskActivity records that GSIC just did work (a /task or /shell call).

@@ -20,8 +20,8 @@ import (
 // Version info. Keep in step with the Android GSIC version line.
 const (
 	AppName     = "GSIC"
-	Version     = "4.43"
-	VersionCode = 443
+	Version     = "4.44"
+	VersionCode = 444
 	Platform    = "windows"
 )
 
