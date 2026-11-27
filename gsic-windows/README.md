@@ -1,4 +1,4 @@
-# GSIC Windows 版 v4.44
+# GSIC Windows 版 v4.45
 
 GSIC Windows 版是 Muse 的"手"，运行在 Windows 10/11 x64 PC 上。
 它只执行、不决策：云端 Muse 大脑发步骤过来，它负责操作这台电脑
@@ -259,6 +259,9 @@ rsrc -manifest gsic.manifest -ico assets/gsic.ico -o gsic_windows_amd64.syso
 ```
 
 ## 更新日志
+
+### v4.45（2026-11-27）
+- 防休眠再修正：v4.44 的 1 像素移动用的是 SetCursorPos，它只挪光标、不产生输入事件、不更新系统最后输入时间，云平台计时器仍不重置（实测云电脑 ~08:03 还是睡了）。改成 SendInput 相对移动（+1 再 -1），产生真正的输入事件；光标最终位置不变
 
 ### v4.44（2026-11-27）
 - 防休眠修正：v4.43 的零位移鼠标移动重置不了云平台的空闲计时（实测云电脑仍在 ~07:23 休眠），改成真正的 1 像素移动再移回原位（光标最终位置不变，不干扰点击）；SetThreadExecutionState 仍保留（阻止 Windows 自身睡眠）

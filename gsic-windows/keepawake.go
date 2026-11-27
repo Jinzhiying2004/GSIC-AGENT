@@ -5,6 +5,7 @@ package main
 import (
 	"sync"
 	"time"
+	"unsafe"
 )
 
 // Keep-awake: while GSIC is running tasks, the PC must not sleep;
@@ -46,20 +47,27 @@ func keepAwakeRelease() {
 	_, _, _ = procSetThreadExecutionState.Call(uintptr(esContinuous))
 }
 
-// pokeInput moves the cursor 1 pixel and back. It must be a real move:
-// a zero-delta move does NOT reset the cloud platform's idle timer
-// (proven 2026-11-27: the VM slept at ~07:23 despite the zero-delta poke).
+// pokeInput moves the cursor 1 pixel and back via SendInput, so it is a
+// real input event. It must be SendInput, not SetCursorPos:
+// SetCursorPos only moves the cursor and does NOT update the system's
+// last-input time, so the cloud platform's idle timer never resets
+// (v4.44 used SetCursorPos and the VM still slept at ~08:03).
 // The cursor returns to its original spot, so a task's clicks are not
 // disturbed.
 func pokeInput() {
-	x, y := GetMousePos()
-	sw, _ := ScreenSize()
-	if x < sw-1 {
-		_ = MoveMouse(x+1, y)
-	} else {
-		_ = MoveMouse(x-1, y)
-	}
-	_ = MoveMouse(x, y)
+	_ = sendInputs([]winInput{
+		newMouseInputRel(mouseMove, 1, 0),
+		newMouseInputRel(mouseMove, -1, 0),
+	})
+}
+
+// newMouseInputRel builds a relative mouse-move input (dx, dy in pixels).
+func newMouseInputRel(flags uint32, dx, dy int32) winInput {
+	in := newMouseInput(flags, 0)
+	mi := (*winMouseInput)(unsafe.Pointer(&in.U[0]))
+	mi.Dx = dx
+	mi.Dy = dy
+	return in
 }
 
 // NoteTaskActivity records that GSIC just did work (a /task or /shell call).
