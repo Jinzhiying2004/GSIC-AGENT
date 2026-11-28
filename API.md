@@ -3,14 +3,31 @@
 App 内置 HTTP 服务，端口 **28789**（v2.41 起默认端口由 18789 改为 28789，
 可在 App「远控」页修改，1024–65535），所有接口需 token 鉴权：
 请求头 `X-Token: xxx`（Issue #1 起不再接受 `?token=` 查询参数）。
-token 在 App「远控」页可见，
-可一键复制连接信息发给云端。
+鉴权接受主 Token 或配对签发的设备 Token（Issue #3）。
+新智能体先用一次性配对码调 `POST /pair` 换设备凭据（见下），
+主 Token 绝不会出现在二维码、提示词或任何分享内容里。
 
 安全：v2.42 起服务加来源 IP 白名单，只放行本机回环与 Tailscale 网段
 （100.64.0.0/10），局域网其他设备直连会被拒绝。Tailscale 断线时云端
 将无法直连（无局域网备用）。
 
 ## 接口
+
+### POST /pair — 一次性配对码换设备凭据（Issue #3）
+```bash
+curl -X POST "http://手机IP:28789/pair" \
+  -H "Content-Type: application/json" \
+  -d '{"code": "ABCDEFGH", "device": "Muse 云端"}'
+# {"ok":true,"token":"<设备凭据>","expires_in_days":30,"device":"Muse 云端"}
+```
+- 配对码在 App「远控」页「连接智能体」卡看（二维码里也是它）：8 位，
+  10 分钟有效、一次有效；错 5 次作废；新码生成即作废旧码
+- 配对不需要先鉴权（配对本身就是取凭据的入口）
+- 设备凭据有效期 30 天、最小权限（与主 Token 同等调用接口，但可按设备吊销）；
+  主 Token 轮换/吊销时全部设备凭据同时失效
+- 配对码错误、过期、被作废时一律返回 `{"ok":false,"error":"invalid_code"}`
+  （不区分原因，防枚举）
+- 拿到设备凭据后，其他接口一律用请求头 `X-Token: <设备凭据>`
 
 ### GET /status
 ```bash
@@ -103,6 +120,14 @@ curl -X POST "http://手机IP:28789/patch" -H "X-Token: xxx" \
 - 补丁用 `tools/make_patch.py` 对基线差分打包；
   manifest/res/assets 变更不能打补丁，仍需整包安装
 - ⚠️ 推送前请按铁律先问用户「推吗」，确认后再推
+
+## 应用内自更新校验（Issue #3，与 Windows #4 同款硬拒绝口径）
+
+- `version.json` 必须带 `sha256` 字段（构建时由 build.sh 对签名后的 APK 算出）
+- 检查更新时：有新版但 `sha256` 缺失或格式错误，直接拒绝并报错
+  “更新源缺少 SHA-256，拒绝更新”
+- 下载 APK 后先验 SHA-256，不匹配删文件并报错
+  “SHA-256 校验失败，安装包可能被篡改，已丢弃”，不安装
 
 ## 云端 Agent 接入（Tailscale）
 

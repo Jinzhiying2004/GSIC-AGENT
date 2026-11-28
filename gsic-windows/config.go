@@ -41,24 +41,29 @@ type Config struct {
 	// AllowLAN re-opens the plain HTTP listener on all interfaces
 	// (Issue #2: default false — loopback only, remote access goes
 	// through the built-in Tailscale node, like Android GSIC).
-	AllowLAN       bool   `json:"allow_lan"`
-	DataDir        string `json:"-"`
-	ConfigPath     string `json:"-"`
-	CardsPath      string `json:"-"`
-	LogPath        string `json:"-"`
-	TokenGenerated bool   `json:"-"`
+	AllowLAN bool `json:"allow_lan"`
+	// PairedDevices holds issued device credentials (Issue #3): each
+	// paired agent gets its own token, valid 30 days, revocable per
+	// device. Stored in config.json (0600) like the master token.
+	PairedDevices  []PairedDevice `json:"paired_devices,omitempty"`
+	DataDir        string         `json:"-"`
+	ConfigPath     string         `json:"-"`
+	CardsPath      string         `json:"-"`
+	LogPath        string         `json:"-"`
+	TokenGenerated bool           `json:"-"`
 }
 
 type configFile struct {
-	Port               int       `json:"port"`
-	Token              string    `json:"token"`
-	AutoUpdate         *bool     `json:"auto_update,omitempty"`
-	AutoInstallUpdates *bool     `json:"auto_install_updates,omitempty"`
-	UpdateChannel      string    `json:"update_channel,omitempty"`
-	UpdateSource       string    `json:"update_source,omitempty"`
-	LastUpdateCheck    time.Time `json:"last_update_check,omitempty"`
-	AllowLAN           *bool     `json:"allow_lan,omitempty"`
-	TailscaleAuthKey   string    `json:"tailscale_auth_key,omitempty"`
+	Port               int            `json:"port"`
+	Token              string         `json:"token"`
+	AutoUpdate         *bool          `json:"auto_update,omitempty"`
+	AutoInstallUpdates *bool          `json:"auto_install_updates,omitempty"`
+	UpdateChannel      string         `json:"update_channel,omitempty"`
+	UpdateSource       string         `json:"update_source,omitempty"`
+	LastUpdateCheck    time.Time      `json:"last_update_check,omitempty"`
+	AllowLAN           *bool          `json:"allow_lan,omitempty"`
+	TailscaleAuthKey   string         `json:"tailscale_auth_key,omitempty"`
+	PairedDevices      []PairedDevice `json:"paired_devices,omitempty"`
 }
 
 // DefaultDataDir returns %APPDATA%\GSIC on Windows and
@@ -115,6 +120,7 @@ func LoadConfig(flagPort int, flagToken, flagDataDir string) (*Config, error) {
 			cfg.AllowLAN = *fileCfg.AllowLAN
 		}
 		cfg.TailscaleAuthKey = fileCfg.TailscaleAuthKey
+		cfg.PairedDevices = fileCfg.PairedDevices
 	}
 
 	// 2. env
@@ -168,6 +174,7 @@ func (c *Config) Save() error {
 		LastUpdateCheck:    c.LastUpdateCheck,
 		AllowLAN:           &allowLAN,
 		TailscaleAuthKey:   c.TailscaleAuthKey,
+		PairedDevices:      c.PairedDevices,
 	}, "", "  ")
 	if err != nil {
 		return err
@@ -176,12 +183,16 @@ func (c *Config) Save() error {
 }
 
 // RegenerateToken creates a fresh token, saves it, and returns it.
+// All paired-device credentials are voided at the same time (Issue #3:
+// a rotation means the old master token is no longer trusted, so the
+// credentials issued under it must not survive either).
 func RegenerateToken(cfg *Config) (string, error) {
 	tok, err := GenerateToken()
 	if err != nil {
 		return "", err
 	}
 	cfg.Token = tok
+	cfg.ClearPairedDevices()
 	if err := cfg.Save(); err != nil {
 		return "", err
 	}

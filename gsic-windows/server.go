@@ -62,6 +62,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/cards", s.auth(s.handleCards))
 	mux.HandleFunc("/card", s.auth(s.handleCard))
 	mux.HandleFunc("/agent-prompt", s.auth(s.handleAgentPrompt))
+	// Issue #3: /pair exchanges a one-time pairing code for a device
+	// credential. Pairing is how a credential is obtained, so it runs
+	// before auth (no X-Token required).
+	mux.HandleFunc("/pair", s.handlePair)
 	mux.HandleFunc("/update/check", s.auth(s.handleUpdateCheck))
 	mux.HandleFunc("/update/apply", s.auth(s.handleUpdateApply))
 	mux.HandleFunc("/update/push", s.auth(s.handleUpdatePush))
@@ -71,12 +75,13 @@ func (s *Server) Handler() http.Handler {
 
 // ---- auth + JSON helpers ----
 
-// auth requires the X-Token header to match the configured token
-// (constant-time compare). Missing/wrong token -> 401.
+// auth requires the X-Token header to match the configured master
+// token or a valid paired-device token (Issue #3; constant-time
+// compare). Missing/wrong token -> 401.
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		got := r.Header.Get("X-Token")
-		if got == "" || !constantTimeEqual(got, s.cfg.Token) {
+		if got == "" || (!constantTimeEqual(got, s.cfg.Token) && !s.cfg.IsValidDeviceToken(got)) {
 			writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
 				"ok": false, "error": "unauthorized: bad or missing X-Token",
 			})
@@ -266,8 +271,9 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAgentPrompt returns the filled agent prompt (connection info +
-// instructions) for an agent that already has the token — e.g. one that
-// scanned the connect QR code and needs the full instructions.
+// instructions) for an agent that already has a credential — e.g. one
+// that paired and needs the full instructions. The prompt never
+// contains any credential (Issue #3).
 func (s *Server) handleAgentPrompt(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeErr(w, http.StatusMethodNotAllowed, "GET only")
@@ -279,6 +285,50 @@ func (s *Server) handleAgentPrompt(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"ok": true, "prompt": FillAgentPrompt(s.cfg, ip),
+	})
+}
+
+// handlePair exchanges a one-time pairing code for a device credential
+// (Issue #3): POST {"code", "device"} -> {"ok", "token",
+// "expires_in_days", "device"}. A wrong/expired/voided code always
+// returns invalid_code (no distinction, against enumeration); a
+// credential that cannot be stored is refused with pairing_failed.
+func (s *Server) handlePair(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "POST only")
+		return
+	}
+	var p struct {
+		Code   string `json:"code"`
+		Device string `json:"device"`
+	}
+	if err := readBodyJSON(r, &p); err != nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"ok": false, "error": "invalid_code",
+		})
+		return
+	}
+	device := strings.TrimSpace(p.Device)
+	if device == "" {
+		device = "未命名设备"
+	}
+	if rs := []rune(device); len(rs) > 64 {
+		device = string(rs[:64])
+	}
+	if strings.TrimSpace(p.Code) == "" || !ValidatePairingCode(strings.TrimSpace(p.Code)) {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"ok": false, "error": "invalid_code",
+		})
+		return
+	}
+	cred, err := s.cfg.IssueDeviceToken(device)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "pairing_failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"ok": true, "token": cred.Token,
+		"expires_in_days": DeviceExpiryDays, "device": device,
 	})
 }
 

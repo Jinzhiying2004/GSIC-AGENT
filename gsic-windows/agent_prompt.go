@@ -25,7 +25,10 @@ const windowsPlatformNotes = `## 平台说明（Windows）
 3. GET /screenshot 确认字打上去了`
 
 // FillAgentPrompt renders the agent prompt template with this
-// device's live connection info.
+// device's live connection info. The prompt never contains any
+// credential (Issue #3): the agent authenticates with the device
+// credential it got from POST /pair. A leftover {{TOKEN}} placeholder
+// from an old template is stripped rather than filled.
 func FillAgentPrompt(cfg *Config, tailIP string) string {
 	hostname, _ := os.Hostname()
 	if hostname == "" {
@@ -34,10 +37,9 @@ func FillAgentPrompt(cfg *Config, tailIP string) string {
 	r := strings.NewReplacer(
 		"{{TAILNET_IP}}", tailIP,
 		"{{PORT}}", fmt.Sprintf("%d", cfg.Port),
-		"{{TOKEN}}", cfg.Token,
 		"{{HOSTNAME}}", hostname,
 		"{{PLATFORM}}", "Windows",
 		"{{PLATFORM_NOTES}}", windowsPlatformNotes,
 	)
-	return r.Replace(agentPromptTemplate)
+	return strings.ReplaceAll(r.Replace(agentPromptTemplate), "{{TOKEN}}", "")
 }

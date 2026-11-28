@@ -41,17 +41,21 @@ type WalkMainWindow struct {
 	lblUpdate     *walk.Label
 	leLoginURL    *walk.LineEdit
 	btnLoginURL   *walk.PushButton
-	loginShown     bool
-	leAuthKey      *walk.LineEdit
-	lblAuthKey     *walk.Label
-	btnAuthKey     *walk.PushButton
+	loginShown    bool
+	leAuthKey     *walk.LineEdit
+	lblAuthKey    *walk.Label
+	btnAuthKey    *walk.PushButton
 
 	// Connect tab widgets.
 	ivQR          *walk.ImageView
 	leRemoteAddr  *walk.LineEdit
-	leTokenShow   *walk.LineEdit
-	cbShowToken   *walk.CheckBox
+	lePairCode    *walk.LineEdit
+	lblPairRemain *walk.Label
+	lbDevices     *walk.ListBox
+	deviceIDs     []string
+	devicesSig    string
 	qrIP          string
+	qrCode        string
 
 	// Settings tab widgets.
 	nePort        *walk.NumberEdit
@@ -217,18 +221,26 @@ func NewWalkMainWindow(cfg *Config, cards *CardStore, updater *Updater, gui *GUI
 								Children: []Widget{
 									Label{Text: "远控地址："},
 									LineEdit{AssignTo: &mw.leRemoteAddr, ReadOnly: true, Text: "-"},
-									Label{Text: "Token："},
-									Composite{
-										Layout: HBox{},
-										Children: []Widget{
-											LineEdit{AssignTo: &mw.leTokenShow, ReadOnly: true, Text: maskToken(cfg.Token)},
-											CheckBox{
-												AssignTo: &mw.cbShowToken,
-												Text:     "显示",
-												OnCheckedChanged: func() {
-													mw.toggleTokenShow()
-												},
-											},
+									Label{Text: "配对码："},
+									LineEdit{AssignTo: &mw.lePairCode, ReadOnly: true, Text: "-"},
+									Label{Text: "配对码有效期："},
+									Label{AssignTo: &mw.lblPairRemain, Text: "-"},
+									Label{Text: "主 Token 有效期："},
+									Label{Text: "永久有效"},
+								},
+							},
+							GroupBox{
+								Title:  "已配对设备",
+								Layout: VBox{},
+								Children: []Widget{
+									ListBox{
+										AssignTo: &mw.lbDevices,
+										MinSize:  Size{Height: 80},
+									},
+									PushButton{
+										Text: "吊销选中设备",
+										OnClicked: func() {
+											mw.revokeSelectedDevice()
 										},
 									},
 								},
@@ -243,14 +255,26 @@ func NewWalkMainWindow(cfg *Config, cards *CardStore, updater *Updater, gui *GUI
 										},
 									},
 									PushButton{
-										Text: "复制地址和 Token",
+										Text: "复制地址和配对码",
 										OnClicked: func() {
 											mw.copyConnectShort()
 										},
 									},
+									PushButton{
+										Text: "刷新配对码",
+										OnClicked: func() {
+											mw.refreshPairingCode()
+										},
+									},
+									PushButton{
+										Text: "轮换 Token",
+										OnClicked: func() {
+											mw.rotateToken()
+										},
+									},
 								},
 							},
-							Label{Text: "提示：二维码和提示词里都包含 Token，只发给你的智能体。"},
+							Label{Text: "提示：二维码和提示词里不含主 Token，配对码 10 分钟有效、用一次就作废；配对后凭据 30 天有效。"},
 							VSpacer{},
 						},
 					},
@@ -502,11 +526,21 @@ func (mw *WalkMainWindow) refreshStatus() {
 	mw.refreshQR()
 }
 
-// refreshQR regenerates the connect QR code when the tailnet IP changes.
+// refreshQR regenerates the connect QR code when the tailnet IP or the
+// pairing code changes. It also refreshes the pairing code display
+// (code + remaining validity) and the paired-device list.
 func (mw *WalkMainWindow) refreshQR() {
 	if mw.ivQR == nil {
 		return
 	}
+	code := GetOrCreatePairingCode()
+	if mw.lePairCode != nil {
+		mw.lePairCode.SetText(code)
+	}
+	if mw.lblPairRemain != nil {
+		mw.lblPairRemain.SetText(formatPairRemaining(PairingCodeRemaining()))
+	}
+	mw.refreshDevices()
 	ip := ""
 	if mw.tsnet != nil {
 		ip = mw.tsnet.TailIP()
@@ -516,10 +550,10 @@ func (mw *WalkMainWindow) refreshQR() {
 		return
 	}
 	mw.leRemoteAddr.SetText(fmt.Sprintf("http://%s:%d", ip, mw.cfg.Port))
-	if ip == mw.qrIP {
+	if ip == mw.qrIP && code == mw.qrCode {
 		return
 	}
-	bmp, err := qrBitmap(ip, mw.cfg.Port, mw.cfg.Token, 512)
+	bmp, err := qrBitmap(ip, mw.cfg.Port, code, 512)
 	if err != nil {
 		Logf("WARN: QR code failed (%v)", err)
 		return
@@ -529,16 +563,98 @@ func (mw *WalkMainWindow) refreshQR() {
 		return
 	}
 	mw.qrIP = ip
+	mw.qrCode = code
 }
 
-// toggleTokenShow switches the connect tab token line between masked
-// and full text.
-func (mw *WalkMainWindow) toggleTokenShow() {
-	if mw.cbShowToken.Checked() {
-		mw.leTokenShow.SetText(mw.cfg.Token)
-	} else {
-		mw.leTokenShow.SetText(maskToken(mw.cfg.Token))
+// refreshDevices reloads the paired-device list box (skipped when the
+// list text did not change, so the selection is not reset every tick).
+func (mw *WalkMainWindow) refreshDevices() {
+	if mw.lbDevices == nil {
+		return
 	}
+	devs := mw.cfg.ListPairedDevices()
+	items := make([]string, 0, len(devs))
+	ids := make([]string, 0, len(devs))
+	for _, d := range devs {
+		items = append(items, fmt.Sprintf("%s（剩余 %d 天）", d.Device, d.RemainingDays))
+		ids = append(ids, d.ID)
+	}
+	if len(items) == 0 {
+		items = []string{"（暂无已配对设备）"}
+		ids = []string{""}
+	}
+	sig := strings.Join(items, "\n")
+	if sig == mw.devicesSig {
+		return
+	}
+	mw.devicesSig = sig
+	mw.deviceIDs = ids
+	if err := mw.lbDevices.SetModel(items); err != nil {
+		Logf("WARN: device list refresh failed (%v)", err)
+	}
+}
+
+// refreshPairingCode voids the current pairing code and shows a fresh
+// one (QR code follows on the next refresh).
+func (mw *WalkMainWindow) refreshPairingCode() {
+	GeneratePairingCode()
+	mw.refreshQR()
+}
+
+// revokeSelectedDevice revokes the credential of the device selected
+// in the paired-device list.
+func (mw *WalkMainWindow) revokeSelectedDevice() {
+	if mw.lbDevices == nil {
+		return
+	}
+	idx := mw.lbDevices.CurrentIndex()
+	if idx < 0 || idx >= len(mw.deviceIDs) {
+		return
+	}
+	id := mw.deviceIDs[idx]
+	if id == "" {
+		return
+	}
+	if !mw.cfg.RevokePairedDevice(id) {
+		walk.MsgBox(mw.MainWindow, "吊销失败", "没找到这个设备，可能已经过期或被吊销。", walk.MsgBoxIconWarning)
+		return
+	}
+	mw.devicesSig = ""
+	mw.refreshDevices()
+}
+
+// rotateToken regenerates the master token (confirm first: the old
+// token stops working everywhere, including the owner's own remote
+// scripts) and voids all paired-device credentials at the same time.
+func (mw *WalkMainWindow) rotateToken() {
+	if walk.MsgBox(mw.MainWindow, "轮换 Token？",
+		"轮换后旧 Token 立即失效（包括你自己的远控脚本），全部已配对设备凭据同时作废，需要重新配对。确定轮换吗？",
+		walk.MsgBoxYesNo|walk.MsgBoxIconQuestion) != walk.DlgCmdYes {
+		return
+	}
+	if _, err := RegenerateToken(mw.cfg); err != nil {
+		walk.MsgBox(mw.MainWindow, "轮换失败", fmt.Sprintf("无法保存新 Token：%v", err), walk.MsgBoxIconError)
+		return
+	}
+	if mw.lblToken != nil {
+		mw.lblToken.SetText(maskToken(mw.cfg.Token))
+	}
+	mw.devicesSig = ""
+	mw.refreshQR()
+	walk.MsgBox(mw.MainWindow, "已轮换", "新 Token 已保存，旧 Token 与全部设备凭据已失效。请更新你自己的远控配置里的 Token。", walk.MsgBoxIconInformation)
+}
+
+// formatPairRemaining renders the pairing code TTL for the connect tab.
+func formatPairRemaining(d time.Duration) string {
+	if d <= 0 {
+		return "已过期"
+	}
+	m := int(d.Minutes())
+	s := int(d.Seconds()) % 60
+	if m > 0 {
+		return fmt.Sprintf("剩余 %d 分 %d 秒", m, s)
+	}
+	return fmt.Sprintf("剩余 %d 秒", s)
 }
 
 // copyAgentPrompt copies the full agent prompt (connection info +
@@ -560,7 +676,8 @@ func (mw *WalkMainWindow) copyAgentPrompt() {
 	walk.MsgBox(mw.MainWindow, "已复制", "完整提示词已复制到剪贴板，粘贴给你的智能体即可。", walk.MsgBoxIconInformation)
 }
 
-// copyConnectShort copies just the address and token.
+// copyConnectShort copies the address and the one-time pairing code
+// (never the master token).
 func (mw *WalkMainWindow) copyConnectShort() {
 	ip := ""
 	if mw.tsnet != nil {
@@ -570,12 +687,12 @@ func (mw *WalkMainWindow) copyConnectShort() {
 		walk.MsgBox(mw.MainWindow, "还没连上", "Tailscale 还没拿到地址，先完成登录再复制。", walk.MsgBoxIconWarning)
 		return
 	}
-	text := fmt.Sprintf("远控地址：http://%s:%d\nToken：%s", ip, mw.cfg.Port, mw.cfg.Token)
+	text := qrConnectText(ip, mw.cfg.Port, GetOrCreatePairingCode())
 	if err := SetClipboardText(text); err != nil {
 		walk.MsgBox(mw.MainWindow, "复制失败", fmt.Sprintf("无法复制：%v", err), walk.MsgBoxIconError)
 		return
 	}
-	walk.MsgBox(mw.MainWindow, "已复制", "地址和 Token 已复制到剪贴板。", walk.MsgBoxIconInformation)
+	walk.MsgBox(mw.MainWindow, "已复制", "地址和配对码已复制到剪贴板。", walk.MsgBoxIconInformation)
 }
 
 // applyAuthKey saves the pasted Tailscale auth key and rejoins the

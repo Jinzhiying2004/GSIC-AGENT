@@ -63,12 +63,30 @@ fi
 ls -lh assets/gsic-tsnet
 
 # cloudflared：内置隧道二进制（linux-arm64 静态版，官方 GitHub releases）。
-# 二进制不进 git 推送管线；构建时缺失则自动拉取，存在则直接用。
+# Issue #6：固定版本 + 每次构建都校验 SHA-256（不再走 releases/latest；
+# 升版本时改下面两处常量：CLOUDFLARED_VERSION 与 CLOUDFLARED_SHA256，
+# 哈希以官方发布页该版本 SHA256 Checksums 里的 cloudflared-linux-arm64 为准，
+# 并以官方版本下载地址拉到的文件实测哈希交叉核对）。
+# 二进制不进 git 推送管线；缺失或哈希不符时自动重拉固定版本，校验失败则停打包。
+CLOUDFLARED_VERSION=2026.11.2
+CLOUDFLARED_SHA256=04a7b7f08bce85d56b26ffe1fdbfbb21a074495a363d16f0783c40e25b5c5281
 if [ ! -f assets/cloudflared ] || [ ! -s assets/cloudflared ]; then
-  echo "== cloudflared 拉取（构建时，官方 releases） =="
+  echo "== cloudflared 拉取（构建时，官方 releases，固定版本 $CLOUDFLARED_VERSION） =="
   curl -L --max-time 180 -o assets/cloudflared \
-    https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64
+    https://github.com/cloudflare/cloudflared/releases/download/$CLOUDFLARED_VERSION/cloudflared-linux-arm64
   chmod +x assets/cloudflared
+fi
+if ! echo "$CLOUDFLARED_SHA256  assets/cloudflared" | sha256sum -c -; then
+  echo "警告：assets/cloudflared 哈希不符（可能旧版本或下载损坏），重拉固定版本 $CLOUDFLARED_VERSION" >&2
+  rm -f assets/cloudflared
+  curl -L --max-time 180 -o assets/cloudflared \
+    https://github.com/cloudflare/cloudflared/releases/download/$CLOUDFLARED_VERSION/cloudflared-linux-arm64
+  chmod +x assets/cloudflared
+  echo "$CLOUDFLARED_SHA256  assets/cloudflared" | sha256sum -c - || {
+    echo "错误：cloudflared $CLOUDFLARED_VERSION 校验失败，停止打包" >&2
+    rm -f assets/cloudflared
+    exit 1
+  }
 fi
 ls -lh assets/cloudflared
 
@@ -140,14 +158,20 @@ ls -la $APK
 
 echo "== 生成 version.json（应用内更新用，发布时填写 apkUrl） =="
 python3 -c "
-import json, re
+import hashlib, json, re
 m = open('AndroidManifest.xml').read()
 vc = re.search(r'versionCode=\"(\d+)\"', m).group(1)
 vn = re.search(r'versionName=\"([\d.]+)\"', m).group(1)
 apk_url = ('https://github.com/Jinzhiying2004/GSIC-AGENT'
            '/releases/download/v%s/gsic-%s.apk' % (vn, vn))
+# Issue #3：version.json 带所编 APK 的 SHA-256（签名后算），
+# 自更新下载后验 hash，不匹配拒绝安装
+h = hashlib.sha256()
+with open('../gsic-%s.apk' % vn, 'rb') as f:
+    for c in iter(lambda: f.read(65536), b''): h.update(c)
 json.dump({'version': vn, 'versionCode': int(vc), 'apkUrl': apk_url,
-           'notes': ''}, open('../version.json', 'w'), ensure_ascii=False, indent=2)
+           'notes': '', 'sha256': h.hexdigest()},
+          open('../version.json', 'w'), ensure_ascii=False, indent=2)
 print(open('../version.json').read())
 "
 echo "提示：version.json 已自动填 Release 直链；发版时把 version.json 提交进仓库根目录、APK 传到对应 Release，软件内自更新即通"

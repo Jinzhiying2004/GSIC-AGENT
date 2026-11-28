@@ -2442,10 +2442,14 @@ public class MainActivity extends Activity {
     }
 
     // ---------- 连接智能体（v4.33，与电脑版同款）：二维码 + 一键复制提示词 ----------
+    // Issue #3：二维码只放地址 + 一次性配对码，主 Token 不再进分享面
     private android.widget.ImageView agentQrView;
     private TextView agentInfo, agentWarn;
+    private PairingManager pairingManager;
+    private LinearLayout agentDevicesBox;
 
     private LinearLayout buildAgentConnectCard() {
+        pairingManager = new PairingManager(this);
         LinearLayout c = card();
         c.addView(cardTitle("连接智能体"));
         TextView hint = new TextView(this);
@@ -2489,7 +2493,7 @@ public class MainActivity extends Activity {
             }
         });
         c.addView(bCopyPrompt);
-        Button bCopyAddr = btn("复制地址和 Token");
+        Button bCopyAddr = btn("复制地址和配对码");
         bCopyAddr.setOnClickListener(v -> {
             String ip = TsnetNode.getTailIp();
             if (ip == null || ip.isEmpty()) {
@@ -2497,20 +2501,43 @@ public class MainActivity extends Activity {
                 return;
             }
             try {
-                String token = new TokenManager(this).getToken();
+                // Issue #3：复制的是地址 + 一次性配对码，不含主 Token
+                String code = PairingManager.getOrCreateCode();
                 android.content.ClipboardManager cm = (android.content.ClipboardManager)
                         getSystemService(CLIPBOARD_SERVICE);
                 cm.setPrimaryClip(android.content.ClipData.newPlainText("gsic-connect",
-                        AgentPrompt.qrConnectText(ip, AgentService.getPort(this), token)));
-                Toast.makeText(this, "地址和 Token 已复制到剪贴板。", Toast.LENGTH_SHORT).show();
+                        AgentPrompt.qrConnectText(ip, AgentService.getPort(this), code)));
+                Toast.makeText(this, "地址和配对码已复制到剪贴板。", Toast.LENGTH_SHORT).show();
             } catch (Exception e) {
                 Toast.makeText(this, "复制失败：" + e.getMessage(), Toast.LENGTH_SHORT).show();
             }
         });
         c.addView(bCopyAddr);
         Button bRefresh = btn("刷新二维码");
-        bRefresh.setOnClickListener(v -> refreshAgentConnectCard());
+        bRefresh.setOnClickListener(v -> {
+            // Issue #3：刷新即重新生成配对码（旧码立即作废）
+            PairingManager.generateCode();
+            refreshAgentConnectCard();
+        });
         c.addView(bRefresh);
+        // Issue #3：连接页直接显示有效期，并给轮换入口（吊销仍在下方 Token 管理）。
+        Button bRotateToken = btn("🔄 轮换 Token（旧码与全部设备凭据同时失效）");
+        bRotateToken.setOnClickListener(v -> {
+            new TokenManager(this).rotate();
+            refreshAgentConnectCard();
+            log("Token 已轮换，旧 token 与全部设备凭据同时失效，二维码已更新");
+        });
+        c.addView(bRotateToken);
+        // Issue #3：已配对设备列表（设备名 + 剩余天数 + 吊销按钮）
+        TextView devTitle = new TextView(this);
+        devTitle.setText("已配对设备");
+        devTitle.setTextSize(14);
+        devTitle.setTextColor(TEXT_DARK);
+        devTitle.setPadding(0, dp(12), 0, dp(4));
+        c.addView(devTitle);
+        agentDevicesBox = new LinearLayout(this);
+        agentDevicesBox.setOrientation(LinearLayout.VERTICAL);
+        c.addView(agentDevicesBox);
         return c;
     }
 
@@ -2526,18 +2553,71 @@ public class MainActivity extends Activity {
         }
         if (agentWarn != null) agentWarn.setVisibility(View.GONE);
         try {
+            // Issue #3：二维码只放地址 + 一次性配对码，不含主 Token
+            String code = PairingManager.getOrCreateCode();
+            long codeLeftMs = PairingManager.getCodeRemainingMs();
+            String codeLeft = codeLeftMs < 0 ? "已过期"
+                    : "剩余 " + Math.max(1, (codeLeftMs + 59999) / 60000) + " 分钟";
             String token = new TokenManager(this).getToken();
             int port = AgentService.getPort(this);
-            android.graphics.Bitmap bmp = AgentPrompt.qrBitmap(ip, port, token, 512);
+            android.graphics.Bitmap bmp = AgentPrompt.qrBitmap(ip, port, code, 512);
             agentQrView.setImageBitmap(bmp);
             agentQrView.setVisibility(View.VISIBLE);
             if (agentInfo != null) {
+                // Issue #3：连接页显示配对码剩余有效期与主 Token 有效期。
+                String remainStr = TokenManager.formatRemaining(
+                        new TokenManager(this).getRemainingMs());
                 agentInfo.setText("地址：http://" + ip + ":" + port
-                        + "\nToken：" + TokenManager.mask(token));
+                        + "\n配对码：" + code + "（" + codeLeft + "，一次有效）"
+                        + "\n主 Token：" + TokenManager.mask(token)
+                        + "\n主 Token 有效期：" + remainStr);
             }
+            refreshAgentDevices();
         } catch (Exception e) {
             agentQrView.setVisibility(View.GONE);
             if (agentInfo != null) agentInfo.setText("二维码生成失败：" + e.getMessage());
+        }
+    }
+
+    /** 重建已配对设备列表（设备名 + 剩余天数 + 吊销按钮）。 */
+    private void refreshAgentDevices() {
+        if (agentDevicesBox == null) return;
+        agentDevicesBox.removeAllViews();
+        if (pairingManager == null) pairingManager = new PairingManager(this);
+        java.util.List<org.json.JSONObject> devs = pairingManager.listDevices();
+        if (devs.isEmpty()) {
+            TextView empty = new TextView(this);
+            empty.setTextSize(13);
+            empty.setTextColor(TEXT_GRAY);
+            empty.setText("暂无已配对设备");
+            agentDevicesBox.addView(empty);
+            return;
+        }
+        for (org.json.JSONObject d : devs) {
+            String id = d.optString("id", "");
+            String name = d.optString("device", "");
+            int days = d.optInt("remainingDays", 0);
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            TextView tv = new TextView(this);
+            tv.setTextSize(13);
+            tv.setTextColor(TEXT_DARK);
+            tv.setText(name + "（剩余 " + days + " 天）");
+            LinearLayout.LayoutParams tvLp = new LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+            row.addView(tv, tvLp);
+            Button bRevokeDev = smallBtn("吊销");
+            bRevokeDev.setOnClickListener(v -> {
+                if (pairingManager.revokeDevice(id)) {
+                    log("已吊销设备凭据：" + name);
+                    refreshAgentConnectCard();
+                } else {
+                    Toast.makeText(this, "吊销失败", Toast.LENGTH_SHORT).show();
+                }
+            });
+            row.addView(bRevokeDev);
+            agentDevicesBox.addView(row);
         }
     }
 
@@ -2899,9 +2979,8 @@ public class MainActivity extends Activity {
         tokenInfo.setTextColor(TEXT_GRAY);
         Runnable refreshTokenInfo = () -> {
             String masked = TokenManager.mask(tm.getToken());
-            long remainMs = tm.getRemainingMs();
-            String remainStr = remainMs < 0 ? "永久有效"
-                    : "剩余 " + (remainMs / 86400000) + " 天";
+            // Issue #3：连接页与 Token 管理显示同一有效期口径
+            String remainStr = TokenManager.formatRemaining(tm.getRemainingMs());
             // Issue #1：Keystore 降级时明确提示用户 token 未加密保存
             String warn = tm.isKeystoreDegraded()
                     ? "\n⚠️ Keystore 不可用，token 未加密保存，仅内存有效（重启后变更）" : "";
@@ -2918,8 +2997,8 @@ public class MainActivity extends Activity {
         expiryLabel.setTextSize(13);
         expiryRow.addView(expiryLabel);
         android.widget.Spinner expirySpinner = new android.widget.Spinner(this);
-        String[] expOptions = {"永久", "7 天", "30 天"};
-        int[] expValues = {0, 7, 30};
+        String[] expOptions = {"永久", "7 天", "30 天", "3 年"};
+        int[] expValues = {0, 7, 30, TokenManager.EXPIRY_3_YEARS};
         android.widget.ArrayAdapter<String> expAdapter =
                 new android.widget.ArrayAdapter<>(this,
                         android.R.layout.simple_spinner_item, expOptions);
@@ -2957,13 +3036,13 @@ public class MainActivity extends Activity {
             String newToken = tm.rotate();
             refreshTokenInfo.run();
             log("Token 已轮换：" + TokenManager.mask(newToken)
-                    + "，旧 token 立即失效");
+                    + "，旧 token 与全部设备凭据同时失效");
         });
         Button bRevoke = smallBtn("🚫 吊销");
         bRevoke.setOnClickListener(v -> {
             new android.app.AlertDialog.Builder(this)
                     .setTitle("吊销 Token？")
-                    .setMessage("吊销后当前 token 立即失效，需重新复制连接信息给 Muse。")
+                    .setMessage("吊销后当前 token 立即失效，已配对的设备凭据同时失效，需重新配对。")
                     .setPositiveButton("吊销", (d, w) -> {
                         tm.revoke();
                         refreshTokenInfo.run();
@@ -4424,7 +4503,7 @@ public class MainActivity extends Activity {
     private void doCheckUpdate() {
         updStatus.setText("正在检查更新…");
         UpdateManager.check(this,
-                (hasUpdate, version, code, apkUrl, notes, err) ->
+                (hasUpdate, version, code, apkUrl, notes, err, sha256) ->
                         runOnUiThread(() -> {
                             if (err != null) {
                                 updStatus.setText(err);
@@ -4441,17 +4520,17 @@ public class MainActivity extends Activity {
                                             ? "是否下载安装？"
                                             : notes + "\n\n是否下载安装？")
                                     .setPositiveButton("下载",
-                                            (d, w) -> downloadUpdate(apkUrl, version))
+                                            (d, w) -> downloadUpdate(apkUrl, version, sha256))
                                     .setNegativeButton("稍后", null)
                                     .show();
                         }));
     }
 
-    private void downloadUpdate(String apkUrl, String version) {
+    private void downloadUpdate(String apkUrl, String version, String sha256) {
         updProgress.setVisibility(View.VISIBLE);
         updProgress.setProgress(0);
         updStatus.setText("正在下载 " + version + "…");
-        UpdateManager.download(this, apkUrl, new UpdateManager.DownloadListener() {
+        UpdateManager.download(this, apkUrl, sha256, new UpdateManager.DownloadListener() {
             @Override
             public void onProgress(int p) {
                 runOnUiThread(() -> updProgress.setProgress(p));

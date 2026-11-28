@@ -16,6 +16,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.security.MessageDigest;
 
 /**
  * 应用内更新（热更新的应用内安装形态，非热补丁）。
@@ -27,7 +28,7 @@ public class UpdateManager {
 
     public interface CheckListener {
         void onResult(boolean hasUpdate, String version, int versionCode,
-                      String apkUrl, String notes, String err);
+                      String apkUrl, String notes, String err, String sha256);
     }
 
     public interface DownloadListener {
@@ -68,7 +69,8 @@ public class UpdateManager {
         final Context app = ctx.getApplicationContext();
         final String src = getSource(app);
         if (src == null || src.trim().isEmpty()) {
-            cb.onResult(false, null, 0, null, null, "未设置更新源，请先设置更新源地址");
+            cb.onResult(false, null, 0, null, null,
+                    "未设置更新源，请先设置更新源地址", null);
             return;
         }
         new Thread(() -> {
@@ -81,7 +83,7 @@ public class UpdateManager {
                 c.connect();
                 if (c.getResponseCode() != 200) {
                     cb.onResult(false, null, 0, null, null,
-                            "更新源返回 " + c.getResponseCode());
+                            "更新源返回 " + c.getResponseCode(), null);
                     return;
                 }
                 String body = readAll(c.getInputStream());
@@ -89,22 +91,32 @@ public class UpdateManager {
                 int rc = j.optInt("versionCode", 0);
                 String rv = j.optString("version", "");
                 if (rc > currentCode(app)) {
+                    // Issue #3（与 Windows #4 同款硬拒绝口径）：有新版时
+                    // version.json 必须带有效 SHA-256，否则拒绝更新
+                    String sha = j.optString("sha256", "");
+                    if (!isValidSha256(sha)) {
+                        cb.onResult(false, rv, rc, null, null,
+                                "更新源缺少 SHA-256，拒绝更新", null);
+                        return;
+                    }
                     cb.onResult(true, rv, rc, j.optString("apkUrl", ""),
-                            j.optString("notes", ""), null);
+                            j.optString("notes", ""), null, sha);
                 } else {
-                    cb.onResult(false, rv, rc, null, null, null);
+                    cb.onResult(false, rv, rc, null, null, null, null);
                 }
             } catch (Exception e) {
                 cb.onResult(false, null, 0, null, null,
-                        "检查失败：" + e.getMessage());
+                        "检查失败：" + e.getMessage(), null);
             } finally {
                 if (c != null) c.disconnect();
             }
         }).start();
     }
 
-    /** 下载 APK 到私有目录 files/updates/update.apk，带进度 */
-    public static void download(Context ctx, String apkUrl, DownloadListener dl) {
+    /** 下载 APK 到私有目录 files/updates/update.apk，带进度；
+     * 下完先验 SHA-256，不匹配删文件并报错（Issue #3，硬拒绝口径） */
+    public static void download(Context ctx, String apkUrl, String expectedSha256,
+                                DownloadListener dl) {
         final Context app = ctx.getApplicationContext();
         new Thread(() -> {
             HttpURLConnection c = null;
@@ -140,6 +152,11 @@ public class UpdateManager {
                         }
                     }
                 }
+                if (!verifySha256(out, expectedSha256)) {
+                    out.delete();
+                    dl.onDone(null, "SHA-256 校验失败，安装包可能被篡改，已丢弃");
+                    return;
+                }
                 dl.onDone(out, null);
             } catch (Exception e) {
                 dl.onDone(null, "下载失败：" + e.getMessage());
@@ -147,6 +164,36 @@ public class UpdateManager {
                 if (c != null) c.disconnect();
             }
         }).start();
+    }
+
+    /** SHA-256 是否为 64 位十六进制（大小写均可） */
+    public static boolean isValidSha256(String s) {
+        if (s == null || s.length() != 64) return false;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+                    || (c >= 'A' && c <= 'F'))) return false;
+        }
+        return true;
+    }
+
+    /** 校验文件 SHA-256（小写比较）；文件缺失/读失败/期望值非法都返回 false */
+    public static boolean verifySha256(File f, String expected) {
+        if (f == null || !f.isFile() || !isValidSha256(expected)) return false;
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            try (InputStream in = new java.io.FileInputStream(f)) {
+                byte[] buf = new byte[65536];
+                int n;
+                while ((n = in.read(buf)) > 0) md.update(buf, 0, n);
+            }
+            byte[] digest = md.digest();
+            StringBuilder sb = new StringBuilder(64);
+            for (byte b : digest) sb.append(String.format("%02x", b & 0xff));
+            return sb.toString().equals(expected.toLowerCase(java.util.Locale.US));
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     /**
@@ -254,16 +301,19 @@ public class UpdateManager {
             long last = p.getLong("last_check_ts", 0);
             if (System.currentTimeMillis() - last < 24 * 3600_000L) return;
             p.edit().putLong("last_check_ts", System.currentTimeMillis()).apply();
-            check(ctx, (hasUpdate, version, code, apkUrl, notes, err) -> {
+            check(ctx, (hasUpdate, version, code, apkUrl, notes, err, sha256) -> {
                 try {
                     android.content.SharedPreferences.Editor e =
                             ctx.getSharedPreferences("update",
                                     Context.MODE_PRIVATE).edit();
                     if (err == null && hasUpdate) {
                         e.putString("avail_version", version)
-                                .putInt("avail_code", code);
+                                .putInt("avail_code", code)
+                                .putString("avail_sha256",
+                                        sha256 == null ? "" : sha256);
                     } else if (err == null) {
-                        e.remove("avail_version").remove("avail_code");
+                        e.remove("avail_version").remove("avail_code")
+                                .remove("avail_sha256");
                     }
                     e.apply();
                 } catch (Exception ignored) {

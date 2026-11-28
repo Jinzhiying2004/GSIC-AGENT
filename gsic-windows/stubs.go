@@ -5,7 +5,10 @@
 // implementations live in the *_windows.go files.
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 var errNotWindows = fmt.Errorf("not supported on this platform (Windows-only feature)")
 
@@ -44,3 +47,12 @@ func ActivateWindowByTitle(substr string) (*WindowInfo, error) {
 
 func GetClipboardText() (string, error)  { return "", errNotWindows }
 func SetClipboardText(text string) error { return errNotWindows }
+
+// Keep-awake is Windows-only (keepawake.go is windows-tagged); on
+// Linux the task activity hooks are no-ops and the state reads false.
+func NoteTaskActivity() {}
+func NoteTaskDone()     {}
+
+func KeepAwakeActive() bool { return false }
+
+func KeepAwakePulse() (count int64, last time.Time) { return 0, time.Time{} }

@@ -4,25 +4,18 @@ package main
 
 import (
 	"bytes"
-	"fmt"
 	"image/png"
 
 	"github.com/lxn/walk"
 	"github.com/skip2/go-qrcode"
 )
 
-// qrConnectText builds the QR payload: connection info plus the
-// instruction to fetch the full agent prompt from the device.
-// The full prompt (~4KB) is too big for a QR code, so the code
-// carries only address + token and points at /agent-prompt.
-func qrConnectText(tailIP string, port int, token string) string {
-	return fmt.Sprintf("GSIC 远控连接\n地址：http://%s:%d\nToken：%s\n连上后先用 X-Token 请求头调 GET /agent-prompt 取完整操作说明，再开始工作。",
-		tailIP, port, token)
-}
+// qrConnectText lives in pairing.go: the QR payload carries only the
+// address + one-time pairing code, never any credential (Issue #3).
 
 // qrBitmap renders the connect QR code as a Walk bitmap (size px square).
-func qrBitmap(tailIP string, port int, token string, size int) (*walk.Bitmap, error) {
-	qr, err := qrcode.New(qrConnectText(tailIP, port, token), qrcode.Medium)
+func qrBitmap(tailIP string, port int, pairingCode string, size int) (*walk.Bitmap, error) {
+	qr, err := qrcode.New(qrConnectText(tailIP, port, pairingCode), qrcode.Medium)
 	if err != nil {
 		return nil, err
 	}

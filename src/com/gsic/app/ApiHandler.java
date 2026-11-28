@@ -19,11 +19,14 @@ public class ApiHandler implements AgentHttpServer.Handler {
 
     private final Context ctx;
     private final TokenManager tokenManager;
+    private final PairingManager pairingManager;
 
     public ApiHandler(Context ctx) {
         this.ctx = ctx.getApplicationContext();
         // v3.11 Issue 1：Token 走 TokenManager（轮换/过期/设备绑定）
         this.tokenManager = new TokenManager(this.ctx);
+        // Issue #3：一次性配对码 + 设备凭据
+        this.pairingManager = new PairingManager(this.ctx);
     }
 
     public String getToken() {
@@ -80,10 +83,20 @@ public class ApiHandler implements AgentHttpServer.Handler {
     public String handle(String method, String path, Map<String, String> query,
                          Map<String, String> headers, String body,
                          byte[] rawBody) throws Exception {
+        // Issue #3：POST /pair 在鉴权前处理（用一次性配对码换设备凭据，
+        // 配对本身就是取凭据的入口，不能先要求凭据）
+        if ("/pair".equals(path)) {
+            if (!"POST".equalsIgnoreCase(method)) {
+                return new JSONObject().put("ok", false).put("error", "POST required").toString();
+            }
+            return pairingManager.handlePair(body).toString();
+        }
         // Issue #1：只认 X-Token 请求头，不再接受 ?token= 查询参数（防凭据进 URL 日志）
+        // Issue #3：主 Token 或有效设备 Token 都可鉴权（主 Token 保留，现有远控脚本继续能用）
         String tok = headers.get("x-token");
         // v3.11：token 走 TokenManager（支持轮换/过期）
-        if (!tokenManager.getToken().equals(tok)) {
+        if (!tokenManager.getToken().equals(tok)
+                && !pairingManager.isValidDeviceToken(tok)) {
             return new JSONObject().put("ok", false).put("error", "unauthorized").toString();
         }
         switch (path) {

@@ -7,7 +7,7 @@ import java.util.UUID;
 /**
  * v3.11 Issue 1：远控 Token 管理
  * - 首次启动生成，存 SharedPreferences("agent")
- * - 支持有效期配置（7/30天/永久），到期自动轮换
+ * - 支持有效期配置（7/30天/3年/永久），到期自动轮换
  * - 绑定设备指纹（ANDROID_ID），换机/重装自动失效
  * - 一键吊销
  * - 日志脱敏（只显示后4位）
@@ -21,10 +21,11 @@ public class TokenManager {
     private static final String KEY_TOKEN_DEVICE = "token_device";
     private static final String KEY_TOKEN_EXPIRY = "token_expiry_days";
 
-    /** 有效期选项：0=永久，7=7天，30=30天 */
+    /** 有效期选项：0=永久，7=7天，30=30天，1095=3年（Issue #3：与产品 3 年口径对齐） */
     public static final int EXPIRY_NEVER = 0;
     public static final int EXPIRY_7_DAYS = 7;
     public static final int EXPIRY_30_DAYS = 30;
+    public static final int EXPIRY_3_YEARS = 1095;
 
     private final Context ctx;
     private final SecurePrefs sp;
@@ -53,7 +54,7 @@ public class TokenManager {
         }
 
         // 过期检查
-        int expiryDays = sp.getInt(KEY_TOKEN_EXPIRY, EXPIRY_NEVER);
+        int expiryDays = sp.getInt(KEY_TOKEN_EXPIRY, EXPIRY_3_YEARS);
         if (token != null && expiryDays > 0 && tokenTime > 0) {
             long ageMs = System.currentTimeMillis() - tokenTime;
             if (ageMs > (long) expiryDays * 24 * 3600 * 1000) {
@@ -66,6 +67,11 @@ public class TokenManager {
             // 内存里有上次加密失败留下的 token 时先复用（Keystore 可能已恢复），
             // 否则生成新的；加密仍失败则只留内存、绝不明文落盘
             token = memoryToken != null ? memoryToken : generateToken();
+            // Issue #3：新 Token 默认 3 年有效期；只在从未存过偏好时写一次，
+            // 用户显式选过永久/7天/30天的不动
+            if (!sp.raw().contains(KEY_TOKEN_EXPIRY)) {
+                sp.putInt(KEY_TOKEN_EXPIRY, EXPIRY_3_YEARS);
+            }
             if (sp.putSecure(KEY_TOKEN, token)) {
                 memoryToken = null;
                 sp.putLong(KEY_TOKEN_TIME, System.currentTimeMillis());
@@ -82,6 +88,8 @@ public class TokenManager {
     /** 一键吊销：清除 token，下次 getToken() 会重新生成 */
     public synchronized void revoke() {
         memoryToken = null;
+        // Issue #3：主 Token 吊销，全部设备凭据同时失效
+        PairingManager.clearAllDevices(ctx);
         sp.remove(KEY_TOKEN);
         sp.remove(KEY_TOKEN_TIME);
         sp.remove(KEY_TOKEN_DEVICE);
@@ -92,7 +100,7 @@ public class TokenManager {
         return memoryToken != null;
     }
 
-    /** 手动轮换：立即生成新 token */
+    /** 手动轮换：立即生成新 token（revoke() 内已清空全部设备凭据） */
     public synchronized String rotate() {
         revoke();
         return getToken();
@@ -104,7 +112,7 @@ public class TokenManager {
     }
 
     public int getExpiryDays() {
-        return sp.getInt(KEY_TOKEN_EXPIRY, EXPIRY_NEVER);
+        return sp.getInt(KEY_TOKEN_EXPIRY, EXPIRY_3_YEARS);
     }
 
     /** Token 剩余有效期（毫秒），永久返回 -1 */
@@ -115,6 +123,11 @@ public class TokenManager {
         if (tokenTime == 0) return -1;
         long expiryMs = tokenTime + (long) expiryDays * 24 * 3600 * 1000;
         return Math.max(0, expiryMs - System.currentTimeMillis());
+    }
+
+    /** 有效期文字：永久返回"永久有效"，否则"剩余 X 天"（连接页与 Token 管理共用） */
+    public static String formatRemaining(long remainMs) {
+        return remainMs < 0 ? "永久有效" : "剩余 " + (remainMs / 86400000) + " 天";
     }
 
     /** 脱敏显示：只显示后4位 */
