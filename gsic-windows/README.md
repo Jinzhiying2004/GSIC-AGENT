@@ -1,4 +1,4 @@
-# GSIC Windows 版 v4.45
+# GSIC Windows 版 v4.46
 
 GSIC Windows 版是 Muse 的"手"，运行在 Windows 10/11 x64 PC 上。
 它只执行、不决策：云端 Muse 大脑发步骤过来，它负责操作这台电脑
@@ -259,6 +259,9 @@ rsrc -manifest gsic.manifest -ico assets/gsic.ico -o gsic_windows_amd64.syso
 ```
 
 ## 更新日志
+
+### v4.46（2026-11-28）
+- 防休眠重做：SendInput 模拟输入也重置不了无影平台的空闲计时（v4.43/v4.44/v4.45 实测都睡了）；平台认的是真实的虚拟机活动（网络 I/O + CPU），两条实证——Muse 每几分钟探针一次能让电脑醒一小时以上，腾讯 WorkBuddy 跑后台任务能让电脑醒一整夜。改成每分钟一次真实活动脉冲：截图（GDI + CPU）+ 轻量 HTTPS 请求（出站网络）+ 模拟输入，任务执行期间或任务结束后 10 分钟内持续脉冲，之后恢复正常休眠；长任务（/shell 阻塞等待）全程保持防休眠；`/status` 新增 `keep_awake_pulses`（脉冲次数）与 `keep_awake_last_pulse`（上次脉冲时间）
 
 ### v4.45（2026-11-27）
 - 防休眠再修正：v4.44 的 1 像素移动用的是 SetCursorPos，它只挪光标、不产生输入事件、不更新系统最后输入时间，云平台计时器仍不重置（实测云电脑 ~08:03 还是睡了）。改成 SendInput 相对移动（+1 再 -1），产生真正的输入事件；光标最终位置不变

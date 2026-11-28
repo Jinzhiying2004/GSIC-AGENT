@@ -163,6 +163,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"token_auth":     true,
 		"keep_awake":     KeepAwakeActive(),
 	}
+	// Activity-pulse state (how the keep-awake actually resets the
+	// cloud platform's idle timer).
+	if pc, pl := KeepAwakePulse(); pc > 0 {
+		resp["keep_awake_pulses"] = pc
+		resp["keep_awake_last_pulse"] = pl.Format(time.RFC3339)
+	}
 	// Built-in Tailscale status (no login URL: it's a bearer secret,
 	// it only goes to the log file/console, never to HTTP).
 	if s.tsnet != nil {
@@ -238,6 +244,7 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 	// While GSIC runs tasks the PC must not sleep; it may sleep again
 	// after 10 minutes idle (pay-per-use cloud desktop).
 	NoteTaskActivity()
+	defer NoteTaskDone()
 
 	// Serialize tasks: two tasks driving one mouse/keyboard would garble
 	// each other. A second task waits for the first to finish.
@@ -475,6 +482,7 @@ func (s *Server) handleShell(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	NoteTaskActivity()
+	defer NoteTaskDone()
 	res, err := RunCommand(p.Command, p.Shell, p.Timeout)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "%v", err)
